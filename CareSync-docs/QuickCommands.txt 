@@ -1,7 +1,7 @@
 //  DB 
 docker exec -it caresync-backend-db-1 psql -U postgres -d caresync
 
-\dt -> List all tables (the "Data Tables" view).
+\d -> List all tables (the "Data Tables" view).
 \dt -> Describe a table (shows columns, types, and constraints/foreign keys).
 \dn -> List all schemas.
 \du -> List all users (roles).
