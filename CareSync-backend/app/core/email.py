@@ -1,41 +1,52 @@
-import os
+import logging
 from app.config import settings
-from typing import Optional
 
-async def send_welcome_email(email: str, full_name: str, role: str, agency_name: Optional[str] = None):
-    subject = "Welcome to CareSync"
-    if settings.email_provider == "resend" and settings.resend_api_key:
-        import resend
-        resend.api_key = settings.resend_api_key
-        # For MVP, we'll send a simple email. In production, add a "set password" link.
-        html_content = f"""
-        <h1>Welcome {full_name}!</h1>
-        <p>You've been added as a <strong>{role}</strong> to CareSync.</p>
-        <p>Please contact your agency administrator to set your password.</p>
-        <p>Best regards,<br>CareSync Team</p>
-        """
-        try:
-            resend.Emails.send(
-                from_=settings.email_from,
-                to=email,
+logger = logging.getLogger(__name__)
+
+async def send_welcome_email(email: str, full_name: str, role: str, agency_name: str = None):
+    subject = f"Welcome to CareSync, {full_name}!"
+    
+    # For development, if no API key, just log
+    if settings.environment == "development" and not settings.resend_api_key and not settings.sendgrid_api_key:
+        logger.info(f"[EMAIL MOCK] Would send welcome email to {email}")
+        logger.info(f"Subject: {subject}")
+        return True
+    
+    html_content = f"""
+    <h1>Welcome {full_name}!</h1>
+    <p>You've been added as a <strong>{role}</strong> to CareSync.</p>
+    {f'<p>Agency: {agency_name}</p>' if agency_name else ''}
+    <p>Please contact your agency administrator to set your password and log in.</p>
+    <p>Best regards,<br>CareSync Team</p>
+    """
+    
+    try:
+        if settings.email_provider == "resend" and settings.resend_api_key:
+            import resend
+            resend.api_key = settings.resend_api_key
+            # Correct API call for Resend Python SDK
+            resend.Emails.send({
+                "from": settings.email_from,
+                "to": email,
+                "subject": subject,
+                "html": html_content
+            })
+            logger.info(f"Welcome email sent via Resend to {email}")
+        elif settings.email_provider == "sendgrid" and settings.sendgrid_api_key:
+            from sendgrid import SendGridAPIClient
+            from sendgrid.helpers.mail import Mail
+            message = Mail(
+                from_email=settings.email_from,
+                to_emails=email,
                 subject=subject,
-                html=html_content
+                html_content=html_content
             )
-        except Exception as e:
-            print(f"Email send failed: {e}")
-    elif settings.email_provider == "sendgrid" and settings.sendgrid_api_key:
-        from sendgrid import SendGridAPIClient
-        from sendgrid.helpers.mail import Mail
-        message = Mail(
-            from_email=settings.email_from,
-            to_emails=email,
-            subject=subject,
-            html_content=f"<p>Welcome {full_name}! You've been added as a {role}.</p>"
-        )
-        try:
             sg = SendGridAPIClient(settings.sendgrid_api_key)
             sg.send(message)
-        except Exception as e:
-            print(f"SendGrid failed: {e}")
-    else:
-        print(f"Email provider not configured. Would send welcome email to {email}")
+            logger.info(f"Welcome email sent via SendGrid to {email}")
+        else:
+            logger.warning(f"No email provider configured. Would send to {email}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send welcome email to {email}: {e}")
+        return False
