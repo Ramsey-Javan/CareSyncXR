@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import engine, Base
-from app.api.v1 import auth, users
+from app.api.v1 import auth, users,patients
 from app.seed import seed_database
 import sys
 
@@ -23,6 +23,7 @@ async def startup():
 
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(users.router, prefix="/api/v1")
+app.include_router(patients.router, prefix="/api/v1")
 
 @app.get("/health")
 async def health():
