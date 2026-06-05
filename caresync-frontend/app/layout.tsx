@@ -10,9 +10,9 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "CareSync — Healthcare Care Intelligence",
+  title: "CareSync — AI-Powered Remote Healthcare",
   description:
-    "AI-powered home care monitoring, wearable vitals, caregiver coordination, and emergency SOS",
+    "Multi-tenant healthcare platform for agencies, hospitals, doctors, caregivers, and patients.",
 };
 
 export default function RootLayout({
