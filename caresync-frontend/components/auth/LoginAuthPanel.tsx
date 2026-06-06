@@ -58,21 +58,6 @@ export function LoginAuthPanel() {
     }
   };
 
-  const fillDemo = () => {
-    const demos: Record<string, { email: string; role: string }> = {
-      patient: { email: "patient@caresync.app", role: "patient" },
-      caregiver: { email: "caregiver@caresync.app", role: "caregiver" },
-      family: { email: "family@caresync.app", role: "family" },
-      doctor: { email: "doctor@caresync.app", role: "doctor" },
-      admin: { email: "admin@caresync.app", role: "admin" },
-    };
-    const pick = demos[role] ?? demos.caregiver;
-    setEmail(pick.email);
-    setPassword("password123");
-    setRole(pick.role);
-    toast.message(`Demo credentials filled for ${pick.role}`);
-  };
-
   const handleForgotPassword = (e: React.MouseEvent) => {
     e.preventDefault();
     toast.info(
@@ -209,14 +194,6 @@ export function LoginAuthPanel() {
               <span className="bg-white/90 px-3 text-slate-400 font-semibold">or</span>
             </div>
           </div>
-
-          <button
-            type="button"
-            onClick={fillDemo}
-            className="w-full h-11 rounded-2xl border border-slate-200 bg-slate-50/80 text-sm font-semibold text-slate-700 hover:bg-white hover:border-slate-300 transition-all"
-          >
-            Try demo credentials
-          </button>
 
           <p className="mt-7 text-center text-sm text-slate-500">
             New to CareSync?{" "}

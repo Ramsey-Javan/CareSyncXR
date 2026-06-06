@@ -45,7 +45,6 @@ const ROLES = [
   { value: "caregiver", label: "Caregiver", icon: "🤝" },
   { value: "patient", label: "Patient", icon: "🏥" },
   { value: "family", label: "Family / Next of kin", icon: "👨‍👩‍👧" },
-  { value: "admin", label: "Administrator", icon: "⚙️" },
 ] as const;
 
 const FEATURES = [
@@ -247,10 +246,10 @@ export default function RegisterPage() {
                       })
                     }
                   >
-                    <SelectTrigger className="mt-1 border rounded-xl h-11 text-slate-900">
+                    <SelectTrigger className="mt-1 w-full border rounded-xl h-11 text-slate-900">
                       <SelectValue placeholder="Select your role" />
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent position="popper" className="w-[--radix-select-trigger-width]">
                       {ROLES.map((r) => (
                         <SelectItem key={r.value} value={r.value}>
                           {r.icon} {r.label}

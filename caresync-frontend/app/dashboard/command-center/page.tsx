@@ -12,7 +12,6 @@ import { DashboardCard, DashboardCardHeader } from "@/components/dashboard/Dashb
 import { PageShell } from "@/components/dashboard/PageShell";
 import { analyzeVitalsLocal } from "@/lib/aiEmergencyBrain";
 import { manualSOS } from "@/lib/stream/hospitalStream";
-import { DEFAULT_SOS_TIMELINE } from "@/lib/mock/careSeed";
 import { cn } from "@/lib/utils";
 
 export default function EmergencySOSCenterPage() {
@@ -70,7 +69,7 @@ export default function EmergencySOSCenterPage() {
                   description={activeSos.patientName ?? activeSos.patientCode}
                 />
                 <EmergencyTimeline
-                  steps={activeSos.timeline ?? DEFAULT_SOS_TIMELINE}
+                  steps={activeSos.timeline ?? []}
                 />
               </DashboardCard>
             </>

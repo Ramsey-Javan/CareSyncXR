@@ -6,17 +6,6 @@ import {
   getCareProfile,
   type CareProfile,
 } from "@/lib/careProfile";
-import { createSeedPatient } from "@/lib/mock/seed";
-import {
-  createSeedCaregiverLogs,
-  createSeedMedications,
-  createSeedTimeline,
-} from "@/lib/mock/careSeed";
-import {
-  createCareParticipants,
-  createSeedDoctorNotes,
-} from "@/lib/mock/participantsSeed";
-import { classifyVitals, jitterVitals } from "@/lib/vitals";
 import type {
   AIInsight,
   AlertItem,
@@ -30,7 +19,8 @@ import type {
   MedicationDose,
   Patient,
   SOSEvent,
-  VitalsHistoryPoint,
+  GeoLocation,
+  VitalsSnapshot,
   WearableDevice,
 } from "@/lib/types";
 
@@ -81,6 +71,27 @@ type HospitalState = {
   addDoctorNote: (body: string, authorName?: string) => void;
 };
 
+function emptyVitals(): VitalsSnapshot {
+  return {
+    heartRate: 0,
+    oxygen: 0,
+    bp: "",
+    systolic: 0,
+    diastolic: 0,
+    temperature: 0,
+    respiratoryRate: 0,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function emptyLocation(label?: string): GeoLocation {
+  return {
+    lat: 0,
+    lng: 0,
+    label: label ?? "",
+  };
+}
+
 function buildWearable(patient: Patient): WearableDevice {
   return {
     id: patient.wearableId,
@@ -92,17 +103,6 @@ function buildWearable(patient: Patient): WearableDevice {
     lastSync: new Date().toISOString(),
     streaming: true,
   };
-}
-
-function appendHistory(
-  patient: Patient,
-  vitals: Patient["vitals"]
-): VitalsHistoryPoint[] {
-  const point: VitalsHistoryPoint = {
-    id: `${patient.id}-${Date.now()}`,
-    ...vitals,
-  };
-  return [...patient.history, point].slice(-MAX_HISTORY);
 }
 
 function patientFromCareProfile(base: Patient, profile: CareProfile): Patient {
@@ -122,6 +122,69 @@ function patientFromCareProfile(base: Patient, profile: CareProfile): Patient {
     nextOfKinPhone: profile.nextOfKinPhone,
     nextOfKinEmail: profile.nextOfKinEmail,
   };
+}
+
+function buildPatientFromProfile(profile: CareProfile, userName?: string, userId?: string): Patient {
+  const now = Date.now();
+  const name = profile.patientName.trim() || userName || "";
+  const room =
+    profile.patientLocation?.trim() ||
+    profile.careUnitName?.trim() ||
+    "";
+  return {
+    id: userId ?? `patient-${now}`,
+    name,
+    room,
+    wearableId: `wear-${userId ?? now}`,
+    patientCode: generatePatientCode(),
+    codeRotatesAt: now + 15 * 60 * 1000,
+    status: "stable",
+    vitals: emptyVitals(),
+    history: [],
+    location: emptyLocation(room),
+    caregiverName: profile.caregiverName?.trim() || undefined,
+    doctorName: profile.doctorName?.trim() || undefined,
+    nextOfKin: formatNextOfKin(profile),
+    nextOfKinPhone: profile.nextOfKinPhone,
+    nextOfKinEmail: profile.nextOfKinEmail,
+    careUnitName: profile.careUnitName?.trim() || undefined,
+  };
+}
+
+function buildCareParticipants(patient: Patient): CareParticipant[] {
+  const doctorName = patient.doctorName?.trim() || "";
+  const familyName = patient.nextOfKin?.split("(")[0]?.trim() ?? "";
+
+  return [
+    {
+      id: "part-patient",
+      role: "patient",
+      name: patient.name,
+      title: "Care recipient",
+      online: true,
+    },
+    {
+      id: "part-caregiver",
+      role: "caregiver",
+      name: patient.caregiverName ?? "",
+      title: "Primary caregiver",
+      online: true,
+    },
+    {
+      id: "part-doctor",
+      role: "doctor",
+      name: doctorName,
+      title: "Primary physician",
+      online: false,
+    },
+    {
+      id: "part-family",
+      role: "family",
+      name: familyName,
+      title: "Next of kin",
+      online: false,
+    },
+  ];
 }
 
 function nextScheduleDue(schedule: string[]): string {
@@ -167,44 +230,53 @@ export const useHospitalStore = create<HospitalState>((set, get) => ({
   initialize: () => {
     const user = getUser();
     const profile = user ? getCareProfile(user.email) : null;
-    let activePatient = createSeedPatient();
-
-    if (profile) {
-      activePatient = patientFromCareProfile(activePatient, profile);
-    } else if (user) {
-      if (user.role === "patient" && user.fullName !== "User") {
-        activePatient = { ...activePatient, name: user.fullName };
-      }
-      if (user.role === "caregiver" && user.fullName !== "User") {
-        activePatient = {
-          ...activePatient,
-          caregiverName: user.fullName,
-        };
-      }
+    if (!profile) {
+      set({
+        activePatient: null,
+        wearable: null,
+        familyPatients: [],
+        alerts: [],
+        sosEvents: [],
+        insights: [],
+        consultations: [],
+        medications: [],
+        caregiverLogs: [],
+        timeline: [],
+        careParticipants: [],
+        doctorNotes: [],
+        emergency: {
+          active: false,
+          activeSosId: null,
+          globalAlertLevel: "stable",
+          lastUpdated: new Date().toISOString(),
+        },
+        streamConnected: false,
+      });
+      return;
     }
 
-    const medications = createSeedMedications(activePatient);
-    const caregiverLogs = createSeedCaregiverLogs(activePatient);
-    const timeline = createSeedTimeline(activePatient, caregiverLogs);
+    const activePatient = buildPatientFromProfile(profile, user?.fullName, user?.id);
     set({
       activePatient,
       wearable: buildWearable(activePatient),
-      medications,
-      caregiverLogs,
-      timeline,
-      careParticipants: createCareParticipants(activePatient),
-      doctorNotes: createSeedDoctorNotes(activePatient),
+      medications: [],
+      caregiverLogs: [],
+      timeline: [],
+      careParticipants: buildCareParticipants(activePatient),
+      doctorNotes: [],
       streamConnected: true,
     });
   },
 
   applyCareProfile: (profile) => {
-    const current = get().activePatient ?? createSeedPatient();
-    const activePatient = patientFromCareProfile(current, profile);
+    const current = get().activePatient;
+    const activePatient = current
+      ? patientFromCareProfile(current, profile)
+      : buildPatientFromProfile(profile, getUser()?.fullName, getUser()?.id);
     set({
       activePatient,
       wearable: buildWearable(activePatient),
-      careParticipants: createCareParticipants(activePatient),
+      careParticipants: buildCareParticipants(activePatient),
     });
   },
 
@@ -225,72 +297,7 @@ export const useHospitalStore = create<HospitalState>((set, get) => ({
     }),
 
   tickVitals: () => {
-    const p = get().activePatient;
-    if (!p) return;
-
-    const alertsToAdd: AlertItem[] = [];
-    const vitals = jitterVitals(p.vitals);
-    const status = classifyVitals(vitals);
-    const globalLevel = status;
-
-    const prevStatus = p.status;
-    const activePatient: Patient = {
-      ...p,
-      vitals,
-      status,
-      history: appendHistory(p, vitals),
-    };
-
-    if (status !== prevStatus && status !== "stable") {
-      alertsToAdd.push({
-        id: `alert-${Date.now()}-${p.id}`,
-        patientId: p.id,
-        patientCode: p.patientCode,
-        patientName: p.name,
-        severity: status,
-        message:
-          status === "critical"
-            ? "Critical vitals — SOS protocol may activate"
-            : "Warning threshold — increase home monitoring",
-        vitals,
-        createdAt: new Date().toISOString(),
-        acknowledged: false,
-      });
-      get().pushTimeline({
-        patientId: p.id,
-        kind: "alert" as const,
-        title: status === "critical" ? "Critical alert" : "Warning alert",
-        detail: `Wearable detected ${status} vitals`,
-        createdAt: new Date().toISOString(),
-      });
-    }
-
-    const wearable = get().wearable
-      ? {
-          ...get().wearable!,
-          patientCode: activePatient.patientCode,
-          lastSync: new Date().toISOString(),
-          battery: Math.max(
-            15,
-            get().wearable!.battery - (Math.random() > 0.92 ? 1 : 0)
-          ),
-        }
-      : buildWearable(activePatient);
-
-    set((s) => ({
-      activePatient,
-      wearable,
-      alerts: [...alertsToAdd, ...s.alerts].slice(0, 50),
-      timeline: s.timeline.slice(0, 80),
-      emergency: {
-        ...s.emergency,
-        globalAlertLevel: globalLevel,
-        active: globalLevel === "critical" || s.emergency.active,
-        lastUpdated: new Date().toISOString(),
-      },
-    }));
-
-    get().checkMedicationMissed();
+    if (!get().activePatient) return;
   },
 
   pushAlert: (alert) =>
@@ -504,6 +511,7 @@ export const useHospitalStore = create<HospitalState>((set, get) => ({
     const now = Date.now();
     set((s) => {
       const p = s.activePatient;
+      if (!p || s.medications.length === 0) return s;
       let changed = false;
       const medications = s.medications.map((m) => {
         const due = new Date(m.nextDueAt).getTime();
@@ -539,16 +547,7 @@ export const useHospitalStore = create<HospitalState>((set, get) => ({
           patientName: p?.name ?? "Patient",
           severity: "warning" as const,
           message: `Missed dose: ${m.name} — correlate with vitals trend`,
-          vitals: p?.vitals ?? {
-            heartRate: 0,
-            oxygen: 0,
-            bp: "—",
-            systolic: 0,
-            diastolic: 0,
-            temperature: 0,
-            respiratoryRate: 0,
-            timestamp: new Date().toISOString(),
-          },
+          vitals: p.vitals,
           createdAt: new Date().toISOString(),
           acknowledged: false,
         }));
@@ -569,13 +568,15 @@ export const useHospitalStore = create<HospitalState>((set, get) => ({
       familyPatients: s.familyPatients.filter((p) => p.id !== id),
     })),
 
-  addDoctorNote: (body, authorName = "Dr. Amina Ochieng") => {
+  addDoctorNote: (body, authorName) => {
     const p = get().activePatient;
     if (!p || !body.trim()) return;
+    const author = authorName ?? getUser()?.fullName;
+    if (!author) return;
     const note: DoctorNote = {
       id: `dn-${Date.now()}`,
       patientId: p.id,
-      authorName,
+      authorName: author,
       body: body.trim(),
       createdAt: new Date().toISOString(),
     };

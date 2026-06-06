@@ -10,9 +10,9 @@ export function HospitalStreamProvider({ children }: { children: React.ReactNode
   useEffect(() => {
     initialize();
     const mode =
-      process.env.NEXT_PUBLIC_STREAM_MODE === "websocket"
-        ? "websocket"
-        : "simulated";
+      process.env.NEXT_PUBLIC_STREAM_MODE === "simulated"
+        ? "simulated"
+        : "websocket";
     startHospitalStream(mode);
     return () => stopHospitalStream();
   }, [initialize]);
