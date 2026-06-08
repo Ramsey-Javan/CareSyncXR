@@ -5,12 +5,58 @@ from datetime import datetime, timedelta, timezone
 from app.database import get_db
 from app.models.user import User
 from app.models.refresh_token import RefreshToken
-from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest
-from app.core.auth import verify_password, create_access_token, generate_refresh_token, decode_token
-from app.utils.token_hash import hash_refresh_token, verify_refresh_token
+from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, RegisterRequest, RegisterResponse
+from app.core.auth import verify_password, create_access_token, generate_refresh_token, decode_token, get_password_hash
+from app.utils.token_hash import hash_refresh_token
 from uuid import UUID
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+
+@router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
+async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    allowed_roles = {"patient", "caregiver", "family", "doctor"}
+    if payload.role not in allowed_roles:
+        raise HTTPException(status_code=403, detail="Role not allowed for self-registration")
+
+    existing = await db.execute(select(User).where(User.email == payload.email))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    new_user = User(
+        email=payload.email,
+        hashed_password=get_password_hash(payload.password),
+        full_name=payload.full_name,
+        role=payload.role,
+        agency_id=payload.agency_id,
+        is_active=True,
+    )
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+
+    is_super_admin = (new_user.role == "super_admin")
+    access_token = create_access_token(new_user.id, new_user.agency_id, new_user.role, is_super_admin)
+    raw_refresh = generate_refresh_token()
+    hashed_refresh = hash_refresh_token(raw_refresh)
+    expires_at = datetime.utcnow() + timedelta(days=7)
+
+    refresh_token_db = RefreshToken(
+        user_id=new_user.id,
+        token_hash=hashed_refresh,
+        expires_at=expires_at,
+    )
+    db.add(refresh_token_db)
+    await db.commit()
+
+    return RegisterResponse(
+        id=str(new_user.id),
+        email=new_user.email,
+        full_name=new_user.full_name,
+        role=new_user.role,
+        access_token=access_token,
+        refresh_token=raw_refresh,
+    )
 
 @router.post("/login", response_model=TokenResponse)
 async def login(login_data: LoginRequest, db: AsyncSession = Depends(get_db)):
@@ -38,7 +84,13 @@ async def login(login_data: LoginRequest, db: AsyncSession = Depends(get_db)):
     db.add(refresh_token_db)
     await db.commit()
 
-    return TokenResponse(access_token=access_token, refresh_token=raw_refresh)
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=raw_refresh,
+        user_id=str(user.id),
+        full_name=user.full_name,
+        role=user.role
+    )
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(refresh_req: RefreshRequest, db: AsyncSession = Depends(get_db)):
@@ -72,7 +124,13 @@ async def refresh_token(refresh_req: RefreshRequest, db: AsyncSession = Depends(
     db.add(new_token)
     await db.commit()
 
-    return TokenResponse(access_token=new_access, refresh_token=new_raw_refresh)
+    return TokenResponse(
+        access_token=new_access,
+        refresh_token=new_raw_refresh,
+        user_id=str(user.id),
+        full_name=user.full_name,
+        role=user.role
+    )
 
 @router.post("/logout", status_code=204)
 async def logout(refresh_req: RefreshRequest, db: AsyncSession = Depends(get_db)):

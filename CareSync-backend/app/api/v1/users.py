@@ -8,7 +8,10 @@ from app.models.user import User
 from app.models.agency import Agency
 from app.schemas.user import UserCreate, UserUpdate, UserResponse
 from app.core.dependencies import require_admin, get_agency_id_from_user, get_current_user
-from app.core.auth import get_password_hash, generate_refresh_token
+from app.core.auth import get_password_hash, generate_refresh_token, create_access_token
+from app.utils.token_hash import hash_refresh_token
+from app.models.refresh_token import RefreshToken
+from datetime import datetime, timedelta
 from app.core.email import send_welcome_email
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -38,7 +41,7 @@ async def list_users(
     users = result.scalars().all()
     return users
 
-@router.post("/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_user(
     user_data: UserCreate,
     admin_user: User = Depends(require_admin),
@@ -120,7 +123,24 @@ async def create_user(
             agency_name = agency.name
     await send_welcome_email(new_user.email, new_user.full_name, new_user.role, agency_name)
 
-    return new_user
+    # Create tokens for the new user so frontend can log in immediately
+    is_super_admin = (new_user.role == "super_admin")
+    access_token = create_access_token(new_user.id, new_user.agency_id, new_user.role, is_super_admin)
+    raw_refresh = generate_refresh_token()
+    hashed = hash_refresh_token(raw_refresh)
+    expires_at = datetime.utcnow() + timedelta(days=7)
+    rt = RefreshToken(user_id=new_user.id, token_hash=hashed, expires_at=expires_at)
+    db.add(rt)
+    await db.commit()
+
+    return {
+        "id": str(new_user.id),
+        "email": new_user.email,
+        "full_name": new_user.full_name,
+        "role": new_user.role,
+        "access_token": access_token,
+        "refresh_token": raw_refresh
+    }
 
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_user(

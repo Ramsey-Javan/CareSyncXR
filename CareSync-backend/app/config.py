@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     email_provider: str = "resend"
     email_from: str = "noreply@caresync.com"
 
+    # AI
+    openai_api_key: Optional[str] = None
+
     # Environment
     environment: str = "development"
 
