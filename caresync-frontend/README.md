@@ -1,36 +1,59 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# CareSync Frontend
 
-## Getting Started
+Week 1: **Authentication** connected to FastAPI backend.
 
-First, run the development server:
+## Environment
+
+Copy the example env file for local development:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env.local
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Backend endpoints
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/auth/login` | Returns `access_token`, `refresh_token`, `token_type` |
+| POST | `/auth/logout` | Body: `{ refresh_token }` |
+| POST | `/auth/refresh` | Body: `{ refresh_token }` |
 
-## Learn More
+There is **no public registration endpoint**. The `/register` page directs users to contact their administrator.
 
-To learn more about Next.js, take a look at the following resources:
+## Structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```
+app/
+├── (auth)/login/page.tsx
+├── (auth)/register/page.tsx   # admin-managed access message
+└── dashboard/page.tsx
+components/auth/
+├── AuthLayout.tsx
+└── LoginForm.tsx
+hooks/useAuth.ts
+lib/
+├── api.ts
+├── services/auth.ts
+└── types/auth.ts
+stores/auth-store.ts
+proxy.ts
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Getting started
 
-## Deploy on Vercel
+```bash
+npm install
+npm run dev
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Ensure FastAPI is running at `http://localhost:8000`.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Auth flow
+
+1. **Login** → `POST /auth/login` → stores tokens → redirects to `/dashboard`
+2. **Logout** → `POST /auth/logout` → clears tokens → redirects to `/login`
+3. **401** → attempts token refresh → otherwise clears session and redirects to `/login`
