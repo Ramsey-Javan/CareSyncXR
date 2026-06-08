@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
-export default function Home() {
+/** Landing: send users to login (dashboard requires auth via proxy). */
+export default function HomePage() {
   redirect("/login");
 }

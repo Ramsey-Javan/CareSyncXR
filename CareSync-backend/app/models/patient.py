@@ -39,3 +39,9 @@ class PatientProfile(Base):
     user = relationship("User", backref="patient_profile")
     doctors = relationship("User", secondary=patient_doctor, backref="assigned_patients")
     caregivers = relationship("User", secondary=patient_caregiver, backref="assigned_patients_caregiver")
+    health_readings = relationship(
+        "HealthReading",
+        back_populates="patient",
+        cascade="all, delete-orphan",
+        order_by="HealthReading.recorded_at.desc()",
+    )

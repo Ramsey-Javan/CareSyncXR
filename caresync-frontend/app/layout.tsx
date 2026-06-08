@@ -1,18 +1,29 @@
 import type { Metadata } from "next";
-import { Toaster } from "sonner";
+import { Inter } from "next/font/google";
 import "./globals.css";
+import { Providers } from "./providers";
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
-  title: "CareSync – AI-Powered Remote Healthcare",
-  description: "Continuous care for elderly and chronically ill patients",
+  title: "CareSync — Healthcare Care Intelligence",
+  description:
+    "AI-powered home care monitoring, wearable vitals, caregiver coordination, and emergency SOS",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
-    <html lang="en">
-      <body>
-        {children}
-        <Toaster position="top-right" richColors closeButton />
+    <html lang="en" className={inter.variable}>
+      <body className={`${inter.className} antialiased`}>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
