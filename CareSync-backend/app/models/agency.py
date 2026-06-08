@@ -12,3 +12,4 @@ class Agency(Base):
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     users = relationship("User", back_populates="agency")
+    hospitals = relationship("Hospital", back_populates="agency")

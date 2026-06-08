@@ -8,7 +8,10 @@ from app.models.user import User
 from app.models.agency import Agency
 from app.schemas.user import UserCreate, UserUpdate, UserResponse
 from app.core.dependencies import require_admin, get_agency_id_from_user, get_current_user
-from app.core.auth import get_password_hash, generate_refresh_token
+from app.core.auth import get_password_hash, generate_refresh_token, create_access_token
+from app.utils.token_hash import hash_refresh_token
+from app.models.refresh_token import RefreshToken
+from datetime import datetime, timedelta
 from app.core.email import send_welcome_email
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -38,27 +41,59 @@ async def list_users(
     users = result.scalars().all()
     return users
 
-@router.post("/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_user(
     user_data: UserCreate,
     admin_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    # Validate role + agency
+    # Validate role + agency assignment
     if user_data.role == "super_admin":
+        # Only super_admin can create super_admin
         if admin_user.role != "super_admin":
-            raise HTTPException(status_code=403, detail="Only super admin can create super admin")
-        agency_id = None
+            raise HTTPException(
+                status_code=403, 
+                detail="Only super admin can create super admin users"
+            )
+        agency_id = None  # Super admin users have no agency
     else:
-        if user_data.agency_id is None:
-            if admin_user.role == "super_admin":
-                raise HTTPException(status_code=400, detail="Agency ID required for non-super-admin users")
-            agency_id = admin_user.agency_id  # Regular admin creates users within their agency
-        else:
+        # Creating non-super-admin user
+        if admin_user.role == "super_admin":
+            # Super admin must explicitly provide agency_id
+            if not user_data.agency_id:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Agency ID is required when super admin creates non-super-admin users"
+                )
+            
+            # Validate agency exists
+            agency_exists = await db.execute(
+                select(Agency).where(Agency.id == user_data.agency_id)
+            )
+            if not agency_exists.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"Agency with ID {user_data.agency_id} not found"
+                )
+            
             agency_id = user_data.agency_id
-            # If regular admin, ensure they are creating within their own agency
-            if admin_user.role != "super_admin" and agency_id != admin_user.agency_id:
-                raise HTTPException(status_code=403, detail="Cannot create user outside your agency")
+        else:
+            # Regular admin: must have an agency and can only create within it
+            if not admin_user.agency_id:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Admin user has no agency assigned"
+                )
+            
+            # Force agency to admin's agency (ignore any provided agency_id)
+            agency_id = admin_user.agency_id
+            
+            # Optional: warn if user tried to specify different agency
+            if user_data.agency_id and user_data.agency_id != admin_user.agency_id:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="Regular admins can only create users within their own agency"
+                )
 
     # Check email uniqueness
     existing = await db.execute(select(User).where(User.email == user_data.email))
@@ -88,7 +123,24 @@ async def create_user(
             agency_name = agency.name
     await send_welcome_email(new_user.email, new_user.full_name, new_user.role, agency_name)
 
-    return new_user
+    # Create tokens for the new user so frontend can log in immediately
+    is_super_admin = (new_user.role == "super_admin")
+    access_token = create_access_token(new_user.id, new_user.agency_id, new_user.role, is_super_admin)
+    raw_refresh = generate_refresh_token()
+    hashed = hash_refresh_token(raw_refresh)
+    expires_at = datetime.utcnow() + timedelta(days=7)
+    rt = RefreshToken(user_id=new_user.id, token_hash=hashed, expires_at=expires_at)
+    db.add(rt)
+    await db.commit()
+
+    return {
+        "id": str(new_user.id),
+        "email": new_user.email,
+        "full_name": new_user.full_name,
+        "role": new_user.role,
+        "access_token": access_token,
+        "refresh_token": raw_refresh
+    }
 
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_user(
