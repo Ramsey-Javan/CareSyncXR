@@ -21,8 +21,23 @@ class Settings(BaseSettings):
     # AI
     openai_api_key: Optional[str] = None
 
+    # Video
+    daily_api_key: Optional[str] = None
+
     # Environment
     environment: str = "development"
+
+    frontend_url: str = "http://localhost:3000"
+
+    # Alerts 
+    # Hourly alerts with reading before a miss check in alerts fires 
+    missed_checkin_hours: int = 24
+
+    model_config = ConfigDict(
+        env_file=".env", 
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
 
     # This tells Pydantic to look for a .env file
     model_config = ConfigDict(

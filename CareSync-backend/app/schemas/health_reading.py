@@ -1,12 +1,14 @@
 from datetime import datetime
 from typing import Optional
+from uuid import UUID
 
-from pydantic import BaseModel, UUID4, field_validator, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 BP_SYSTOLIC_RANGE = (60, 250)
 BP_DIASTOLIC_RANGE = (40, 150)
-GLUCOSE_RANGE = (20, 600)
+GLUCOSE_RANGE_MGDL = (20, 600)      # mg/dL range
+GLUCOSE_RANGE_MMOLL = (1.1, 33.3)   # mmol/L range
 WEIGHT_RANGE = (1, 500)
 TEMP_RANGE = (30, 45)
 O2_RANGE = (50, 100)
@@ -14,7 +16,7 @@ HR_RANGE = (20, 300)
 
 
 class HealthReadingCreate(BaseModel):
-    patient_id: UUID4
+    patient_id: UUID
 
     systolic_bp: Optional[int] = None
     diastolic_bp: Optional[int] = None
@@ -62,8 +64,15 @@ class HealthReadingCreate(BaseModel):
     @field_validator("glucose")
     @classmethod
     def validate_glucose(cls, value):
-        if value is not None and not GLUCOSE_RANGE[0] <= value <= GLUCOSE_RANGE[1]:
-            raise ValueError(f"Glucose must be {GLUCOSE_RANGE[0]}-{GLUCOSE_RANGE[1]} mg/dL")
+        if value is None:
+            return value
+        in_mgdl = GLUCOSE_RANGE_MGDL[0] <= value <= GLUCOSE_RANGE_MGDL[1]
+        in_mmoll = GLUCOSE_RANGE_MMOLL[0] <= value <= GLUCOSE_RANGE_MMOLL[1]
+        if not (in_mgdl or in_mmoll):
+            raise ValueError(
+                f"Glucose must be {GLUCOSE_RANGE_MGDL[0]}-{GLUCOSE_RANGE_MGDL[1]} mg/dL "
+                f"or {GLUCOSE_RANGE_MMOLL[0]}-{GLUCOSE_RANGE_MMOLL[1]} mmol/L"
+            )
         return value
 
     @field_validator("weight")
@@ -110,9 +119,9 @@ class HealthReadingUpdate(BaseModel):
 
 
 class HealthReadingResponse(BaseModel):
-    id: UUID4
-    patient_id: UUID4
-    recorded_by: UUID4
+    id: UUID
+    patient_id: UUID
+    recorded_by: UUID
     recorded_at: datetime
 
     systolic_bp: Optional[int] = None
@@ -131,7 +140,7 @@ class HealthReadingResponse(BaseModel):
 
 
 class LatestVitalsResponse(BaseModel):
-    patient_id: UUID4
+    patient_id: UUID
     systolic_bp: Optional[int] = None
     diastolic_bp: Optional[int] = None
     glucose: Optional[float] = None
@@ -141,6 +150,9 @@ class LatestVitalsResponse(BaseModel):
     heart_rate: Optional[int] = None
     last_updated: Optional[datetime] = None
 
+    class Config:
+        from_attributes = True
+
 
 class TrendPoint(BaseModel):
     recorded_at: datetime
@@ -148,7 +160,7 @@ class TrendPoint(BaseModel):
 
 
 class TrendResponse(BaseModel):
-    patient_id: UUID4
+    patient_id: UUID
     vital: str
     unit: str
     data: list[TrendPoint]

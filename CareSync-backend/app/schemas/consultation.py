@@ -1,7 +1,8 @@
 from datetime import datetime
 from typing import Optional
+from uuid import UUID
 
-from pydantic import BaseModel, Field, UUID4
+from pydantic import BaseModel, Field
 
 from app.models.consultation import ConsultationStatus
 
@@ -12,8 +13,8 @@ class ConsultationBase(BaseModel):
 
 
 class ConsultationCreate(ConsultationBase):
-    patient_id: UUID4
-    doctor_id: UUID4
+    patient_id: UUID
+    doctor_id: UUID
 
 
 class ConsultationUpdate(BaseModel):
@@ -28,9 +29,9 @@ class ConsultationUpdate(BaseModel):
 
 
 class ConsultationResponse(ConsultationBase):
-    id: UUID4
-    patient_id: UUID4
-    doctor_id: UUID4
+    id: UUID
+    patient_id: UUID
+    doctor_id: UUID
     status: ConsultationStatus
     daily_room_name: Optional[str] = None
     daily_room_url: Optional[str] = None

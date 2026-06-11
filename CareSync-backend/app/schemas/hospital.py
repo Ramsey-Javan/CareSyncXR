@@ -1,5 +1,6 @@
 from typing import Optional
-from pydantic import BaseModel, UUID4
+from uuid import UUID
+from pydantic import BaseModel
 
 
 class HospitalBase(BaseModel):
@@ -13,7 +14,7 @@ class HospitalBase(BaseModel):
 
 
 class HospitalCreate(HospitalBase):
-    agency_id: Optional[UUID4] = None
+    agency_id: Optional[UUID] = None
 
 
 class HospitalUpdate(BaseModel):
@@ -27,8 +28,8 @@ class HospitalUpdate(BaseModel):
 
 
 class HospitalResponse(HospitalBase):
-    id: UUID4
-    agency_id: Optional[UUID4] = None
+    id: UUID
+    agency_id: Optional[UUID] = None
 
     class Config:
         from_attributes = True

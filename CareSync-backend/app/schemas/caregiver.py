@@ -1,10 +1,11 @@
 from typing import Optional
 
-from pydantic import BaseModel, UUID4
+from uuid import UUID
+from pydantic import BaseModel
 
 
 class VitalsLog(BaseModel):
-    patient_id: UUID4
+    patient_id: UUID
     bp: Optional[str] = None
     glucose: Optional[float] = None
     temperature: Optional[float] = None
@@ -12,5 +13,5 @@ class VitalsLog(BaseModel):
 
 
 class NoteLog(BaseModel):
-    patient_id: UUID4
+    patient_id: UUID
     note: str

@@ -1,3 +1,5 @@
+import uuid
+
 from sqlalchemy import String, ForeignKey, DateTime, Boolean, Enum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -13,7 +15,7 @@ class AlertSeverity(str, enum.Enum):
 class Alert(Base):
     __tablename__ = "alerts"
 
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     patient_id: Mapped[UUID] = mapped_column(ForeignKey("patient_profiles.id", ondelete="CASCADE"), nullable=False)
     severity: Mapped[AlertSeverity] = mapped_column(Enum(AlertSeverity), nullable=False)
     message: Mapped[str] = mapped_column(String(500), nullable=False)

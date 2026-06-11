@@ -1,7 +1,8 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field, UUID4
+from uuid import UUID
+from pydantic import BaseModel, Field
 
 from app.models.caregiver_log import LogType
 
@@ -13,8 +14,8 @@ class CaregiverLogBase(BaseModel):
 
 
 class CaregiverLogCreate(CaregiverLogBase):
-    patient_id: UUID4
-    caregiver_id: UUID4
+    patient_id: UUID
+    caregiver_id: UUID
 
 
 class CaregiverLogUpdate(BaseModel):
@@ -24,9 +25,9 @@ class CaregiverLogUpdate(BaseModel):
 
 
 class CaregiverLogResponse(CaregiverLogBase):
-    id: UUID4
-    patient_id: UUID4
-    caregiver_id: UUID4
+    id: UUID
+    patient_id: UUID
+    caregiver_id: UUID
     created_at: datetime
 
     class Config:

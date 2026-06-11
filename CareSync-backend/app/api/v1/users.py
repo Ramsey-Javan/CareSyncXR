@@ -34,7 +34,7 @@ async def list_users(
             query = query.where(User.agency_id == agency_id)
 
     if role:
-        query = query.where(User.role == role)
+        query = query.where(func.lower(User.role) == role.lower().strip())
 
     query = query.offset(skip).limit(limit)
     result = await db.execute(query)
@@ -48,7 +48,7 @@ async def create_user(
     db: AsyncSession = Depends(get_db)
 ):
     # Validate role + agency assignment
-    if user_data.role == "super_admin":
+    if user_data.role.lower() == "super_admin":
         # Only super_admin can create super_admin
         if admin_user.role != "super_admin":
             raise HTTPException(
