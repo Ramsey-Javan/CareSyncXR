@@ -1,33 +1,16 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
+
 from app.database import engine, Base
 from app.api.v1 import (
-    ai,
-    alerts,
-    auth,
-    caregiver,
-    consultations,
-    health_readings,
-    hospitals,
-    medications,
-    patients,
-    sos,
-    users,
-    dashboard 
+    auth, users, patients, alerts, sos,
+    consultations, caregiver, medications, ai,
+    hospitals, health_readings, dashboard,
 )
 from app.seed import seed_database
-import sys
-
-app = FastAPI(title="CareSync API", version="1.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 async def ensure_week3_schema(conn):
@@ -89,25 +72,44 @@ async def ensure_week3_schema(conn):
     )
 
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await ensure_week3_schema(conn)
     await seed_database()
 
-app.include_router(auth.router, prefix="/api/v1")
-app.include_router(users.router, prefix="/api/v1")
-app.include_router(patients.router, prefix="/api/v1")
-app.include_router(health_readings.router, prefix="/api/v1")
-app.include_router(alerts.router, prefix="/api/v1")
-app.include_router(sos.router, prefix="/api/v1")
-app.include_router(consultations.router, prefix="/api/v1")
-app.include_router(caregiver.router, prefix="/api/v1")
-app.include_router(medications.router, prefix="/api/v1")
-app.include_router(ai.router, prefix="/api/v1")
-app.include_router(hospitals.router, prefix="/api/v1")
-app.include_router(dashboard.router, prefix="/api/v1") 
+    yield
+
+    # Shutdown (add cleanup here if needed)
+
+
+app = FastAPI(title="CareSync API", version="1.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+PREFIX = "/api/v1"
+
+app.include_router(auth.router, prefix=PREFIX)
+app.include_router(users.router, prefix=PREFIX)
+app.include_router(patients.router, prefix=PREFIX)
+app.include_router(health_readings.router, prefix=PREFIX)
+app.include_router(alerts.router, prefix=PREFIX)
+app.include_router(dashboard.router, prefix=PREFIX)
+app.include_router(sos.router, prefix=PREFIX)
+app.include_router(consultations.router, prefix=PREFIX)
+app.include_router(caregiver.router, prefix=PREFIX)
+app.include_router(medications.router, prefix=PREFIX)
+app.include_router(ai.router, prefix=PREFIX)
+app.include_router(hospitals.router, prefix=PREFIX)
+
 
 @app.get("/health")
 async def health():
