@@ -1,9 +1,10 @@
 from typing import List
-from pydantic import BaseModel, Field, UUID4
+from uuid import UUID
+from pydantic import BaseModel, Field
 
 
 class AIAnalyzePayload(BaseModel):
-    patient_id: UUID4 = Field(..., alias="patientId")
+    patient_id: UUID = Field(..., alias="patientId")
     vitals_history: List[dict] = Field(..., alias="vitalsHistory")
 
     class Config:
@@ -12,7 +13,7 @@ class AIAnalyzePayload(BaseModel):
 
 class AIInsightResponse(BaseModel):
     id: str
-    patient_id: UUID4 = Field(..., alias="patientId")
+    patient_id: UUID = Field(..., alias="patientId")
     patient_name: str = Field(..., alias="patientName")
     summary: str
     risk_level: str = Field(..., alias="riskLevel")

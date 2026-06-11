@@ -30,22 +30,19 @@ async def get_patient_with_relationships(db: AsyncSession, patient_id: UUID):
 @router.post("/", response_model=PatientProfileResponse, status_code=status.HTTP_201_CREATED)
 async def create_patient(
     data: PatientProfileCreate,
-    current_user: User = Depends(require_admin),  # Only admins can create patient profiles
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    # Verify that the user exists and has role 'patient'
-    user_stmt = select(User).where(User.id == data.user_id, User.role == "patient")
+    user_stmt = select(User).where(User.id == data.user_id, func.lower(User.role) == "patient")
     user_result = await db.execute(user_stmt)
     patient_user = user_result.scalar_one_or_none()
     if not patient_user:
         raise HTTPException(status_code=404, detail="User with role 'patient' not found")
 
-    # Check if patient profile already exists for this user
     existing = await db.execute(select(PatientProfile).where(PatientProfile.user_id == data.user_id))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Patient profile already exists for this user")
 
-    # Admins can only create patients within their agency (or super admin can do cross-agency)
     if current_user.role != "super_admin":
         if patient_user.agency_id != current_user.agency_id:
             raise HTTPException(status_code=403, detail="Cannot create patient profile for user from another agency")
@@ -67,31 +64,26 @@ async def list_patients(
     db: AsyncSession = Depends(get_db),
     agency_id: Optional[UUID] = Depends(get_agency_id_from_user)
 ):
-    # Build base query with joins
     stmt = select(PatientProfile).where(PatientProfile.is_active == True)
 
-    # Agency isolation: if not super_admin, filter by agency_id (via user.agency_id)
     if current_user.role != "super_admin":
         stmt = stmt.join(User, PatientProfile.user_id == User.id).where(User.agency_id == current_user.agency_id)
     elif agency_id:
         stmt = stmt.join(User, PatientProfile.user_id == User.id).where(User.agency_id == agency_id)
 
-    # Filtering by doctor or caregiver
     if doctor_id:
         stmt = stmt.join(patient_doctor, patient_doctor.c.patient_id == PatientProfile.id).where(patient_doctor.c.doctor_id == doctor_id)
     if caregiver_id:
         stmt = stmt.join(patient_caregiver, patient_caregiver.c.patient_id == PatientProfile.id).where(patient_caregiver.c.caregiver_id == caregiver_id)
 
-    # Search by patient name or email
     if search:
-        stmt = stmt.join(User, PatientProfile.user_id == User.id).where(
+        stmt = stmt.where(
             or_(
                 User.full_name.ilike(f"%{search}%"),
                 User.email.ilike(f"%{search}%")
             )
         )
 
-    # Apply pagination
     stmt = stmt.offset(skip).limit(limit).options(
         selectinload(PatientProfile.user),
         selectinload(PatientProfile.doctors),
@@ -100,7 +92,6 @@ async def list_patients(
     result = await db.execute(stmt)
     patients = result.scalars().all()
 
-    # Build response including user details and doctor/caregiver IDs
     response = []
     for p in patients:
         response.append(PatientWithUserResponse(
@@ -131,16 +122,14 @@ async def get_patient(
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
 
-    # Permission check
     if current_user.role not in ["super_admin", "admin"]:
-        # Doctor can see if assigned, caregiver can see if assigned
         if current_user.role == "doctor":
             if current_user not in patient.doctors:
                 raise HTTPException(status_code=403, detail="Not authorized to view this patient")
         elif current_user.role == "caregiver":
             if current_user not in patient.caregivers:
                 raise HTTPException(status_code=403, detail="Not authorized to view this patient")
-        elif current_user.id != patient.user_id:  # patient themselves
+        elif current_user.id != patient.user_id:
             raise HTTPException(status_code=403, detail="Not authorized")
 
     return PatientWithUserResponse(
@@ -164,14 +153,13 @@ async def get_patient(
 async def update_patient(
     patient_id: UUID,
     data: PatientProfileUpdate,
-    current_user: User = Depends(require_admin),  # Only admins can update profile details
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
     patient = await db.get(PatientProfile, patient_id)
     if not patient or not patient.is_active:
         raise HTTPException(status_code=404, detail="Patient not found")
 
-    # Check agency permission (admin within same agency or super admin)
     if current_user.role != "super_admin":
         user_stmt = select(User).where(User.id == patient.user_id)
         user_res = await db.execute(user_stmt)
@@ -205,7 +193,6 @@ async def delete_patient(
     await db.commit()
     return None
 
-# Additional endpoints to assign doctors/caregivers
 @router.post("/{patient_id}/doctors/{doctor_id}", status_code=204)
 async def assign_doctor(
     patient_id: UUID,
@@ -213,16 +200,24 @@ async def assign_doctor(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    patient = await db.get(PatientProfile, patient_id)
+    stmt = (
+        select(PatientProfile)
+        .where(PatientProfile.id == patient_id)
+        .options(selectinload(PatientProfile.doctors))
+    )
+    result = await db.execute(stmt)
+    patient = result.scalar_one_or_none()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
+
     doctor = await db.get(User, doctor_id)
-    if not doctor or doctor.role != "doctor":
+    if not doctor or doctor.role.lower() != "doctor":
         raise HTTPException(status_code=404, detail="Doctor not found")
-    # Check agency
+
     if current_user.role != "super_admin":
         if doctor.agency_id != current_user.agency_id or patient.user.agency_id != current_user.agency_id:
             raise HTTPException(status_code=403, detail="Agency mismatch")
+
     if doctor not in patient.doctors:
         patient.doctors.append(doctor)
         await db.commit()
@@ -235,16 +230,22 @@ async def remove_doctor(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    patient = await db.get(PatientProfile, patient_id)
+    stmt = (
+        select(PatientProfile)
+        .where(PatientProfile.id == patient_id)
+        .options(selectinload(PatientProfile.doctors))
+    )
+    result = await db.execute(stmt)
+    patient = result.scalar_one_or_none()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
+
     doctor = await db.get(User, doctor_id)
     if doctor in patient.doctors:
         patient.doctors.remove(doctor)
         await db.commit()
     return None
 
-# Similar for caregivers
 @router.post("/{patient_id}/caregivers/{caregiver_id}", status_code=204)
 async def assign_caregiver(
     patient_id: UUID,
@@ -252,15 +253,24 @@ async def assign_caregiver(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    patient = await db.get(PatientProfile, patient_id)
+    stmt = (
+        select(PatientProfile)
+        .where(PatientProfile.id == patient_id)
+        .options(selectinload(PatientProfile.caregivers))
+    )
+    result = await db.execute(stmt)
+    patient = result.scalar_one_or_none()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
+
     caregiver = await db.get(User, caregiver_id)
-    if not caregiver or caregiver.role != "caregiver":
+    if not caregiver or caregiver.role.lower() != "caregiver":
         raise HTTPException(status_code=404, detail="Caregiver not found")
+
     if current_user.role != "super_admin":
         if caregiver.agency_id != current_user.agency_id or patient.user.agency_id != current_user.agency_id:
             raise HTTPException(status_code=403, detail="Agency mismatch")
+
     if caregiver not in patient.caregivers:
         patient.caregivers.append(caregiver)
         await db.commit()
@@ -273,9 +283,16 @@ async def remove_caregiver(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    patient = await db.get(PatientProfile, patient_id)
+    stmt = (
+        select(PatientProfile)
+        .where(PatientProfile.id == patient_id)
+        .options(selectinload(PatientProfile.caregivers))
+    )
+    result = await db.execute(stmt)
+    patient = result.scalar_one_or_none()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
+
     caregiver = await db.get(User, caregiver_id)
     if caregiver in patient.caregivers:
         patient.caregivers.remove(caregiver)

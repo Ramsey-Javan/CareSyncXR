@@ -14,6 +14,7 @@ from app.api.v1 import (
     patients,
     sos,
     users,
+    dashboard 
 )
 from app.seed import seed_database
 import sys
@@ -106,6 +107,7 @@ app.include_router(caregiver.router, prefix="/api/v1")
 app.include_router(medications.router, prefix="/api/v1")
 app.include_router(ai.router, prefix="/api/v1")
 app.include_router(hospitals.router, prefix="/api/v1")
+app.include_router(dashboard.router, prefix="/api/v1") 
 
 @app.get("/health")
 async def health():

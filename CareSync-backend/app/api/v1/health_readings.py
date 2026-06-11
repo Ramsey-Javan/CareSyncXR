@@ -1,14 +1,16 @@
+# app/api/v1/health_readings.py
 import os
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from sqlalchemy.orm import selectinload      
 from app.core.dependencies import get_current_user
+from app.core.email import send_alert_email               # ← Week 4 addition
 from app.database import get_db
 from app.models.alert import Alert, AlertSeverity
 from app.models.health_reading import HealthReading
@@ -24,6 +26,8 @@ from app.schemas.health_reading import (
 
 router = APIRouter(prefix="/health-readings", tags=["Health Readings"])
 
+
+#  Permission helper 
 
 async def _assert_can_access_patient(
     patient: PatientProfile,
@@ -63,6 +67,8 @@ async def _assert_can_access_patient(
     raise HTTPException(status_code=403, detail="Not authorized")
 
 
+# Alert rule engine 
+
 def _evaluate_alerts(reading: HealthReading) -> list[Alert]:
     alerts: list[Alert] = []
 
@@ -85,10 +91,13 @@ def _evaluate_alerts(reading: HealthReading) -> list[Alert]:
             alerts.append(alert(AlertSeverity.WARNING, f"Low blood pressure: {systolic}/{diastolic} mmHg"))
 
     if reading.glucose is not None:
-        if reading.glucose > 200:
-            alerts.append(alert(AlertSeverity.WARNING, f"High glucose: {reading.glucose} mg/dL"))
-        elif reading.glucose < 70:
-            alerts.append(alert(AlertSeverity.CRITICAL, f"Low glucose: {reading.glucose} mg/dL"))
+        # Normalize: if value is likely mmol/L (<= 33), convert to mg/dL
+        glucose_mgdl = reading.glucose * 18 if reading.glucose <= 33 else reading.glucose
+        if glucose_mgdl > 200:
+            alerts.append(alert(AlertSeverity.WARNING, f"High glucose: {reading.glucose}"))
+        elif glucose_mgdl < 70:
+            alerts.append(alert(AlertSeverity.CRITICAL, f"Low glucose: {reading.glucose}"))
+
 
     if reading.oxygen_saturation is not None and reading.oxygen_saturation < 92:
         alerts.append(alert(AlertSeverity.CRITICAL, f"Low oxygen saturation: {reading.oxygen_saturation}%"))
@@ -105,6 +114,8 @@ def _evaluate_alerts(reading: HealthReading) -> list[Alert]:
     return alerts
 
 
+#  Patient fetch helper 
+
 async def _get_active_patient_or_404(patient_id: uuid.UUID, db: AsyncSession) -> PatientProfile:
     result = await db.execute(
         select(PatientProfile).where(
@@ -118,19 +129,35 @@ async def _get_active_patient_or_404(patient_id: uuid.UUID, db: AsyncSession) ->
     return patient
 
 
+#  Endpoints 
+
 @router.post("/", response_model=HealthReadingResponse, status_code=status.HTTP_201_CREATED)
 async def log_reading(
     data: HealthReadingCreate,
+    background_tasks: BackgroundTasks,                     # ← Week 4 addition
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    patient = await _get_active_patient_or_404(data.patient_id, db)
+    # Load patient with relationships needed for alert emails
+    result = await db.execute(                             # ← Week 4: replaced _get_active_patient_or_404
+        select(PatientProfile)
+        .where(PatientProfile.id == data.patient_id, PatientProfile.is_active == True)
+        .options(
+            selectinload(PatientProfile.doctors),
+            selectinload(PatientProfile.caregivers),
+            selectinload(PatientProfile.user),
+        )
+    )
+    patient = result.scalar_one_or_none()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
     await _assert_can_access_patient(patient, current_user, db)
 
     reading = HealthReading(
         patient_id=data.patient_id,
         recorded_by=current_user.id,
-        recorded_at=data.recorded_at or datetime.utcnow(),
+        recorded_at=data.recorded_at.replace(tzinfo=None) if data.recorded_at else datetime.utcnow(),
         systolic_bp=data.systolic_bp,
         diastolic_bp=data.diastolic_bp,
         glucose=data.glucose,
@@ -145,8 +172,22 @@ async def log_reading(
     db.add(reading)
     await db.flush()
 
+    # Fire alert rules and queue notification emails
+    patient_name = patient.user.full_name if patient.user else str(patient.id)
     for triggered_alert in _evaluate_alerts(reading):
         db.add(triggered_alert)
+        await db.flush()                                   # ← get alert.id for email link
+        recipients = list(patient.doctors) + list(patient.caregivers)
+        for recipient in recipients:
+            background_tasks.add_task(                     # ← non-blocking email send
+                send_alert_email,
+                to=recipient.email,
+                recipient_name=recipient.full_name,
+                patient_name=patient_name,
+                severity=triggered_alert.severity.value,
+                message=triggered_alert.message,
+                alert_id=str(triggered_alert.id),
+            )
 
     await db.commit()
     await db.refresh(reading)
@@ -242,13 +283,13 @@ async def get_latest_vitals(
 
 
 VITAL_MAP = {
-    "systolic_bp": (HealthReading.systolic_bp, "mmHg"),
-    "diastolic_bp": (HealthReading.diastolic_bp, "mmHg"),
-    "glucose": (HealthReading.glucose, "mg/dL"),
-    "weight": (HealthReading.weight, "kg"),
-    "temperature": (HealthReading.temperature, "C"),
+    "systolic_bp":       (HealthReading.systolic_bp,       "mmHg"),
+    "diastolic_bp":      (HealthReading.diastolic_bp,      "mmHg"),
+    "glucose":           (HealthReading.glucose,           "mg/dL"),
+    "weight":            (HealthReading.weight,            "kg"),
+    "temperature":       (HealthReading.temperature,       "C"),
     "oxygen_saturation": (HealthReading.oxygen_saturation, "%"),
-    "heart_rate": (HealthReading.heart_rate, "bpm"),
+    "heart_rate":        (HealthReading.heart_rate,        "bpm"),
 }
 
 

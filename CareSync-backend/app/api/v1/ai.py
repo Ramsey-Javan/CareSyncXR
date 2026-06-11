@@ -38,7 +38,7 @@ async def generate_insight(
         summary = "Vitals are stable. Continue current monitoring."
     
     return {
-        "id": str(uuid.uuid4()),
+        "id": str(uuid.uuid()),
         "patientId": str(payload.patient_id),
         "patientName": patient.user.full_name,
         "summary": summary,

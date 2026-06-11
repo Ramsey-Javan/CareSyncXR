@@ -1,7 +1,8 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, UUID4
+from uuid import UUID
+from pydantic import BaseModel, Field
 
 
 class MedicationBase(BaseModel):
@@ -12,7 +13,7 @@ class MedicationBase(BaseModel):
 
 
 class MedicationCreate(MedicationBase):
-    patient_id: UUID4
+    patient_id: UUID
     last_administered_at: Optional[datetime] = None
 
 
@@ -27,8 +28,8 @@ class MedicationUpdate(BaseModel):
 
 
 class MedicationResponse(MedicationBase):
-    id: UUID4
-    patient_id: UUID4
+    id: UUID
+    patient_id: UUID
     last_administered_at: Optional[datetime] = None
     missed: bool
     adherence_percent: float

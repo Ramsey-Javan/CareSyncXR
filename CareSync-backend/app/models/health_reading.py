@@ -15,7 +15,7 @@ class HealthReading(Base):
         index=True,
     )
     recorded_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, index=True)
 
     systolic_bp: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     diastolic_bp: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

@@ -1,14 +1,15 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, Field, UUID4
+from uuid import UUID
+from pydantic import BaseModel, Field
 
 from app.models.sos_event import SOSStatus
 
 
 class SOSPayload(BaseModel):
     patient_code: str
-    patient_id: UUID4
+    patient_id: UUID
     vitals: Dict[str, Any]
     location: Dict[str, Any]
 
@@ -29,8 +30,8 @@ class SOSEventBase(BaseModel):
 
 
 class SOSEventCreate(SOSEventBase):
-    patient_id: UUID4
-    triggered_by: UUID4
+    patient_id: UUID
+    triggered_by: UUID
 
 
 class SOSEventUpdate(BaseModel):
@@ -45,9 +46,9 @@ class SOSEventUpdate(BaseModel):
 
 
 class SOSEventResponse(SOSEventBase):
-    id: UUID4
-    patient_id: UUID4
-    triggered_by: UUID4
+    id: UUID
+    patient_id: UUID
+    triggered_by: UUID
     status: SOSStatus
     hospital_id: Optional[str] = None
     hospital_name: Optional[str] = None
