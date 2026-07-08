@@ -1,0 +1,4208 @@
+diff --cc CareSync-backend/app/api/v1/ai.py
+index 66b7ba1,a6b3fa6..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/api/v1/ai.py
++++ b/CareSync-backend/app/api/v1/ai.py
+@@@ -1,48 -1,48 +1,98 @@@
+++<<<<<<< Updated upstream
+ +from fastapi import APIRouter, Depends, HTTPException
+ +from sqlalchemy.ext.asyncio import AsyncSession
+ +from openai import AsyncOpenAI
+ +from app.config import settings
+ +from app.core.dependencies import get_current_user
+ +from app.models.patient import PatientProfile
+ +from app.schemas.ai import AIAnalyzePayload, AIInsightResponse
+ +from app.database import get_db
+ +import uuid
+ +from datetime import datetime
+ +
+ +router = APIRouter(prefix="/ai", tags=["AI"])
+ +openai_client = AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
+ +
+ +@router.post("/analyze", response_model=AIInsightResponse)
+ +async def generate_insight(
+ +    payload: AIAnalyzePayload,
+ +    current_user = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    patient = await db.get(PatientProfile, payload.patient_id)
+ +    if not patient:
+ +        raise HTTPException(404, "Patient not found")
+ +    
+ +    # Prepare summary from vitals history
+ +    if openai_client:
+ +        # Call OpenAI GPT-4o-mini
+ +        response = await openai_client.chat.completions.create(
+ +            model="gpt-4o-mini",
+ +            messages=[
+ +                {"role": "system", "content": "You are a medical AI assistant. Summarize patient vitals trend and provide risk assessment."},
+ +                {"role": "user", "content": f"Patient vitals history: {payload.vitals_history}"}
+ +            ]
+ +        )
+ +        summary = response.choices[0].message.content
+ +    else:
+ +        # Fallback mock
+ +        summary = "Vitals are stable. Continue current monitoring."
+ +    
+ +    return {
+ +        "id": str(uuid.uuid()),
+ +        "patientId": str(payload.patient_id),
+ +        "patientName": patient.user.full_name,
+ +        "summary": summary,
+ +        "riskLevel": "stable",
+ +        "flags": [],
+ +        "generatedAt": datetime.utcnow().isoformat()
+++=======
++ from fastapi import APIRouter, Depends, HTTPException
++ from sqlalchemy.ext.asyncio import AsyncSession
++ from openai import AsyncOpenAI
++ from app.config import settings
++ from app.core.dependencies import get_current_user
++ from app.models.patient import PatientProfile
++ from app.schemas.ai import AIAnalyzePayload, AIInsightResponse
++ from app.database import get_db
++ import uuid
++ from datetime import datetime
++ 
++ router = APIRouter(prefix="/ai", tags=["AI"])
++ openai_client = AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
++ 
++ @router.post("/analyze", response_model=AIInsightResponse)
++ async def generate_insight(
++     payload: AIAnalyzePayload,
++     current_user = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db)
++ ):
++     patient = await db.get(PatientProfile, payload.patient_id)
++     if not patient:
++         raise HTTPException(404, "Patient not found")
++     
++     # Prepare summary from vitals history
++     if openai_client:
++         # Call OpenAI GPT-4o-mini
++         response = await openai_client.chat.completions.create(
++             model="gpt-4o-mini",
++             messages=[
++                 {"role": "system", "content": "You are a medical AI assistant. Summarize patient vitals trend and provide risk assessment."},
++                 {"role": "user", "content": f"Patient vitals history: {payload.vitals_history}"}
++             ]
++         )
++         summary = response.choices[0].message.content
++     else:
++         # Fallback mock
++         summary = "Vitals are stable. Continue current monitoring."
++     
++     return {
++         "id": str(uuid.uuid4()),
++         "patientId": str(payload.patient_id),
++         "patientName": patient.user.full_name,
++         "summary": summary,
++         "riskLevel": "stable",
++         "flags": [],
++         "generatedAt": datetime.utcnow().isoformat()
+++>>>>>>> Stashed changes
+      }
+diff --cc CareSync-backend/app/api/v1/alerts.py
+index feb48ba,3c2ee61..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/api/v1/alerts.py
++++ b/CareSync-backend/app/api/v1/alerts.py
+@@@ -1,311 -1,44 +1,358 @@@
+++<<<<<<< Updated upstream
+ +# app/api/v1/alerts.py
+ +#
+ +# Week 4 — Alert System
+ +# Endpoints:
+ +#   GET  /alerts/                        — list alerts (filtered, paginated)
+ +#   GET  /alerts/stats                   — counts by severity for dashboard
+ +#   GET  /alerts/{alert_id}              — single alert detail
+ +#   POST /alerts/{alert_id}/acknowledge  — mark acknowledged
+ +#   POST /alerts/missed-checkins         — manually trigger missed check-in scan
+ +#                                          (cron job calls this internally too)
+ +#
+ +from datetime import datetime, timedelta
+ +from typing import List, Optional
+ +from uuid import UUID
+ +
+ +from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+ +from sqlalchemy import select, func, and_
+ +from sqlalchemy.ext.asyncio import AsyncSession
+ +from sqlalchemy.orm import selectinload
+ +
+ +from app.database import get_db
+ +from app.models.alert import Alert, AlertSeverity
+ +from app.models.patient import PatientProfile, patient_doctor, patient_caregiver
+ +from app.models.health_reading import HealthReading
+ +from app.models.user import User
+ +from app.core.dependencies import get_current_user, require_admin
+ +from app.core.email import send_alert_email, send_missed_checkin_email
+ +from app.schemas.alert import AlertResponse, AlertStatsResponse, AcknowledgeRequest
+ +from app.config import settings
+ +
+ +router = APIRouter(prefix="/alerts", tags=["Alerts"])
+ +
+ +
+ +# Permission helper 
+ +
+ +def _base_alert_query(current_user: User):
+ +    """
+ +    Returns a SELECT on Alert pre-filtered by what this user is allowed to see.
+ +      super_admin  → all alerts
+ +      admin        → all alerts within their agency
+ +      doctor       → alerts for patients assigned to them
+ +      caregiver    → alerts for patients assigned to them
+ +      patient      → their own alerts only
+ +    """
+ +    query = select(Alert)
+ +
+ +    if current_user.role == "super_admin":
+ +        return query
+ +
+ +    if current_user.role == "admin":
+ +        # Join through patient → user to check agency
+ +        query = (
+ +            query
+ +            .join(PatientProfile, Alert.patient_id == PatientProfile.id)
+ +            .join(User, PatientProfile.user_id == User.id)
+ +            .where(User.agency_id == current_user.agency_id)
+ +        )
+ +        return query
+ +
+ +    if current_user.role == "doctor":
+ +        query = (
+ +            query
+ +            .join(PatientProfile, Alert.patient_id == PatientProfile.id)
+ +            .join(patient_doctor, patient_doctor.c.patient_id == PatientProfile.id)
+ +            .where(patient_doctor.c.doctor_id == current_user.id)
+ +        )
+ +        return query
+ +
+ +    if current_user.role == "caregiver":
+ +        query = (
+ +            query
+ +            .join(PatientProfile, Alert.patient_id == PatientProfile.id)
+ +            .join(patient_caregiver, patient_caregiver.c.patient_id == PatientProfile.id)
+ +            .where(patient_caregiver.c.caregiver_id == current_user.id)
+ +        )
+ +        return query
+ +
+ +    if current_user.role == "patient":
+ +        query = (
+ +            query
+ +            .join(PatientProfile, Alert.patient_id == PatientProfile.id)
+ +            .where(PatientProfile.user_id == current_user.id)
+ +        )
+ +        return query
+ +
+ +    return query.where(False)  # unknown role — see nothing
+ +
+ +
+ +#  Endpoints 
+ +
+ +@router.get("/stats", response_model=AlertStatsResponse)
+ +async def get_alert_stats(
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db),
+ +):
+ +    """
+ +    Counts used by the dashboard header:
+ +      - total unacknowledged alerts
+ +      - critical / warning / info breakdown
+ +      - alerts raised in the last 24 hours
+ +    """
+ +    base = _base_alert_query(current_user).where(Alert.acknowledged == False)
+ +
+ +    # Total unacknowledged
+ +    total_result = await db.execute(
+ +        base.with_only_columns(func.count()).order_by(None)
+ +    )
+ +    total = total_result.scalar() or 0
+ +
+ +    # By severity
+ +    for_critical = base.with_only_columns(func.count()).where(
+ +        Alert.severity == AlertSeverity.CRITICAL
+ +    ).order_by(None)
+ +    for_warning = base.with_only_columns(func.count()).where(
+ +        Alert.severity == AlertSeverity.WARNING
+ +    ).order_by(None)
+ +    for_info = base.with_only_columns(func.count()).where(
+ +        Alert.severity == AlertSeverity.INFO
+ +    ).order_by(None)
+ +
+ +    critical = (await db.execute(for_critical)).scalar() or 0
+ +    warning  = (await db.execute(for_warning)).scalar()  or 0
+ +    info     = (await db.execute(for_info)).scalar()     or 0
+ +
+ +    # Last 24 hours (any severity, acknowledged or not)
+ +    since = datetime.utcnow() - timedelta(hours=24)
+ +    today_base = _base_alert_query(current_user).where(Alert.created_at >= since)
+ +    today_result = await db.execute(
+ +        today_base.with_only_columns(func.count()).order_by(None)
+ +    )
+ +    today = today_result.scalar() or 0
+ +
+ +    return AlertStatsResponse(
+ +        total_unacknowledged=total,
+ +        critical=critical,
+ +        warning=warning,
+ +        info=info,
+ +        alerts_last_24h=today,
+ +    )
+ +
+ +
+ +@router.get("/", response_model=List[AlertResponse])
+ +async def list_alerts(
+ +    severity: Optional[str] = Query(None, description="critical | warning | info"),
+ +    acknowledged: Optional[bool] = Query(None),
+ +    patient_id: Optional[UUID] = Query(None),
+ +    skip: int = Query(0, ge=0),
+ +    limit: int = Query(50, ge=1, le=200),
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db),
+ +):
+ +    """
+ +    List alerts with optional filters.
+ +    Results ordered: CRITICAL first, then WARNING, then INFO, newest first within each.
+ +    """
+ +    query = _base_alert_query(current_user)
+ +
+ +    if severity:
+ +        try:
+ +            sev_enum = AlertSeverity(severity.lower())
+ +        except ValueError:
+ +            raise HTTPException(400, f"Invalid severity '{severity}'. Use: critical, warning, info")
+ +        query = query.where(Alert.severity == sev_enum)
+ +
+ +    if acknowledged is not None:
+ +        query = query.where(Alert.acknowledged == acknowledged)
+ +
+ +    if patient_id:
+ +        query = query.where(Alert.patient_id == patient_id)
+ +
+ +    # Priority sort: CRITICAL → WARNING → INFO, then newest first
+ +    severity_order = func.case(
+ +        (Alert.severity == AlertSeverity.CRITICAL, 1),
+ +        (Alert.severity == AlertSeverity.WARNING,  2),
+ +        (Alert.severity == AlertSeverity.INFO,     3),
+ +        else_=4,
+ +    )
+ +    query = query.order_by(severity_order, Alert.created_at.desc())
+ +    query = query.offset(skip).limit(limit)
+ +
+ +    result = await db.execute(query)
+ +    return result.scalars().all()
+ +
+ +
+ +@router.get("/{alert_id}", response_model=AlertResponse)
+ +async def get_alert(
+ +    alert_id: UUID,
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db),
+ +):
+ +    alert = await db.get(Alert, alert_id)
+ +    if not alert:
+ +        raise HTTPException(404, "Alert not found")
+ +    return alert
+ +
+ +
+ +@router.post("/{alert_id}/acknowledge", response_model=AlertResponse)
+ +async def acknowledge_alert(
+ +    alert_id: UUID,
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db),
+ +):
+ +    """Mark an alert as acknowledged. Records who acknowledged it and when."""
+ +    alert = await db.get(Alert, alert_id)
+ +    if not alert:
+ +        raise HTTPException(404, "Alert not found")
+ +    if alert.acknowledged:
+ +        raise HTTPException(400, "Alert already acknowledged")
+ +
+ +    alert.acknowledged = True
+ +    alert.acknowledged_by = current_user.id
+ +    alert.acknowledged_at = datetime.utcnow()
+ +    await db.commit()
+ +    await db.refresh(alert)
+ +    return alert
+ +
+ +
+ +#  Missed check-in scanner 
+ +
+ +@router.post("/missed-checkins", status_code=200)
+ +async def scan_missed_checkins(
+ +    background_tasks: BackgroundTasks,
+ +    admin_user: User = Depends(require_admin),
+ +    db: AsyncSession = Depends(get_db),
+ +):
+ +    """
+ +    Scans all active patients. For any patient whose last health reading
+ +    is older than settings.missed_checkin_hours, creates a WARNING alert
+ +    and emails their assigned doctor(s) and caregiver(s).
+ +
+ +    Called by a cron job (e.g. APScheduler or Railway cron) every hour.
+ +    Can also be triggered manually by an admin.
+ +    """
+ +    cutoff = datetime.utcnow() - timedelta(hours=settings.missed_checkin_hours)
+ +
+ +    # Fetch all active patients with their last reading time
+ +    patients_result = await db.execute(
+ +        select(PatientProfile)
+ +        .where(PatientProfile.is_active == True)
+ +        .options(
+ +            selectinload(PatientProfile.doctors),
+ +            selectinload(PatientProfile.caregivers),
+ +            selectinload(PatientProfile.user),
+ +        )
+ +    )
+ +    patients = patients_result.scalars().all()
+ +
+ +    alerts_created = 0
+ +
+ +    for patient in patients:
+ +        # Get last reading timestamp
+ +        last_reading_result = await db.execute(
+ +            select(func.max(HealthReading.recorded_at))
+ +            .where(HealthReading.patient_id == patient.id)
+ +        )
+ +        last_reading_at = last_reading_result.scalar()
+ +
+ +        # Patient has never logged OR hasn't logged recently
+ +        if last_reading_at is None or last_reading_at < cutoff:
+ +            hours_overdue = (
+ +                settings.missed_checkin_hours
+ +                if last_reading_at is None
+ +                else int((datetime.utcnow() - last_reading_at).total_seconds() / 3600)
+ +            )
+ +
+ +            # Avoid duplicate alerts — check if one was already raised in last 6 hours
+ +            recent_alert = await db.execute(
+ +                select(Alert).where(
+ +                    Alert.patient_id == patient.id,
+ +                    Alert.severity == AlertSeverity.WARNING,
+ +                    Alert.message.like("Missed check-in%"),
+ +                    Alert.created_at >= datetime.utcnow() - timedelta(hours=6),
+ +                    Alert.acknowledged == False,
+ +                )
+ +            )
+ +            if recent_alert.scalar_one_or_none():
+ +                continue  # already alerted recently
+ +
+ +            patient_name = patient.user.full_name if patient.user else str(patient.id)
+ +            alert = Alert(
+ +                patient_id=patient.id,
+ +                reading_id=None,
+ +                severity=AlertSeverity.WARNING,
+ +                message=f"Missed check-in: {patient_name} has not logged vitals in {hours_overdue}h",
+ +            )
+ +            db.add(alert)
+ +            await db.flush()
+ +            alerts_created += 1
+ +
+ +            # Email assigned doctors
+ +            for doctor in patient.doctors:
+ +                background_tasks.add_task(
+ +                    send_missed_checkin_email,
+ +                    to=doctor.email,
+ +                    recipient_name=doctor.full_name,
+ +                    patient_name=patient_name,
+ +                    hours_overdue=hours_overdue,
+ +                )
+ +
+ +            # Email assigned caregivers
+ +            for caregiver in patient.caregivers:
+ +                background_tasks.add_task(
+ +                    send_missed_checkin_email,
+ +                    to=caregiver.email,
+ +                    recipient_name=caregiver.full_name,
+ +                    patient_name=patient_name,
+ +                    hours_overdue=hours_overdue,
+ +                )
+ +
+ +    await db.commit()
+-     return {"alerts_created": alerts_created}
+++    return {"alerts_created": alerts_created}
+++=======
++ from fastapi import APIRouter, Depends, HTTPException
++ from sqlalchemy.ext.asyncio import AsyncSession
++ from sqlalchemy import select
++ from uuid import UUID
++ from typing import List, Optional
++ from datetime import datetime
++ from app.database import get_db
++ from app.models.alert import Alert
++ from app.models.patient import PatientProfile
++ from app.models.user import User
++ from app.core.dependencies import get_current_user, get_agency_id_from_user
++ from app.schemas.alert import AlertResponse, AcknowledgeAlert
++ 
++ router = APIRouter(prefix="/alerts", tags=["Alerts"])
++ 
++ @router.get("/", response_model=List[AlertResponse])
++ async def list_alerts(
++     limit: int = 50,
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db),
++     agency_id: Optional[UUID] = Depends(get_agency_id_from_user)
++ ):
++     # Build query with agency isolation
++     query = select(Alert).join(PatientProfile, Alert.patient_id == PatientProfile.id)
++     if current_user.role != "super_admin" and agency_id:
++         query = query.join(User, PatientProfile.user_id == User.id).where(User.agency_id == agency_id)
++     query = query.order_by(Alert.created_at.desc()).limit(limit)
++     result = await db.execute(query)
++     return result.scalars().all()
++ 
++ @router.post("/{alert_id}/acknowledge")
++ async def acknowledge_alert(
++     alert_id: UUID,
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db)
++ ):
++     alert = await db.get(Alert, alert_id)
++     if not alert:
++         raise HTTPException(404, "Alert not found")
++     alert.acknowledged = True
++     alert.acknowledged_by = current_user.id
++     alert.acknowledged_at = datetime.utcnow()
++     await db.commit()
+ -    return {"ok": True}
+++    return {"ok": True}
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/api/v1/caregiver.py
+index 757bd13,1bc9854..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/api/v1/caregiver.py
++++ b/CareSync-backend/app/api/v1/caregiver.py
+@@@ -1,76 -1,68 +1,147 @@@
+++<<<<<<< Updated upstream
+ +from fastapi import APIRouter, Depends, HTTPException
+ +from sqlalchemy.ext.asyncio import AsyncSession
+ +
+ +from app.database import get_db
+ +from app.models.caregiver_log import CaregiverLog, LogType
+ +from app.models.health_reading import HealthReading
+ +from app.models.patient import PatientProfile
+ +from app.models.user import User
+ +from app.core.dependencies import get_current_user
+ +from app.core.alert_engine import evaluate_alerts          
+ +from app.schemas.caregiver import VitalsLog, NoteLog
+ +
+ +router = APIRouter(prefix="/caregiver", tags=["Caregiver"])
+ +
+ +
+ +@router.post("/vitals")
+ +async def log_vitals(
+ +    payload: VitalsLog,
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db),
+ +):
+ +    systolic_bp = None
+ +    diastolic_bp = None
+ +    if payload.bp:
+ +        try:
+ +            systolic, diastolic = payload.bp.split("/", maxsplit=1)
+ +            systolic_bp = int(systolic.strip())
+ +            diastolic_bp = int(diastolic.strip())
+ +        except ValueError:
+ +            raise HTTPException(status_code=400, detail="BP must use systolic/diastolic format, e.g. 120/80")
+ +
+ +    if any(value is not None for value in (payload.glucose, systolic_bp, diastolic_bp, payload.temperature)):
+ +        reading = HealthReading(
+ +            patient_id=payload.patient_id,
+ +            recorded_by=current_user.id,
+ +            glucose=payload.glucose,
+ +            systolic_bp=systolic_bp,
+ +            diastolic_bp=diastolic_bp,
+ +            temperature=payload.temperature,
+ +            notes=payload.note,
+ +        )
+ +        db.add(reading)
+ +        await db.flush()                                   
+ +
+ +        for alert in evaluate_alerts(reading):             
+ +            db.add(alert)
+ +
+ +    # Caregiver log entry
+ +    log = CaregiverLog(
+ +        patient_id=payload.patient_id,
+ +        caregiver_id=current_user.id,
+ +        log_type=LogType.VITALS,
+ +        summary=f"Manual vitals: {', '.join(filter(None, [f'BP {payload.bp}' if payload.bp else None, f'Glucose {payload.glucose}' if payload.glucose else None, f'Temp {payload.temperature}' if payload.temperature else None]))}",
+ +        detail=payload.note,
+ +    )
+ +    db.add(log)
+ +    await db.commit()
+ +    return {"ok": True}
+ +
+ +
+ +@router.post("/notes")
+ +async def add_note(
+ +    payload: NoteLog,
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db),
+ +):
+ +    log = CaregiverLog(
+ +        patient_id=payload.patient_id,
+ +        caregiver_id=current_user.id,
+ +        log_type=LogType.NOTE,
+ +        summary="Caregiver observation",
+ +        detail=payload.note,
+ +    )
+ +    db.add(log)
+ +    await db.commit()
+-     return {"ok": True}
+++    return {"ok": True}
+++=======
++ from fastapi import APIRouter, Depends, HTTPException
++ from sqlalchemy.ext.asyncio import AsyncSession
++ from app.database import get_db
++ from app.models.caregiver_log import CaregiverLog, LogType
++ from app.models.health_reading import HealthReading
++ from app.models.patient import PatientProfile
++ from app.models.user import User
++ from app.core.dependencies import get_current_user
++ from app.schemas.caregiver import VitalsLog, NoteLog
++ 
++ router = APIRouter(prefix="/caregiver", tags=["Caregiver"])
++ 
++ @router.post("/vitals")
++ async def log_vitals(
++     payload: VitalsLog,
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db)
++ ):
++     systolic_bp = None
++     diastolic_bp = None
++     if payload.bp:
++         try:
++             systolic, diastolic = payload.bp.split("/", maxsplit=1)
++             systolic_bp = int(systolic.strip())
++             diastolic_bp = int(diastolic.strip())
++         except ValueError:
++             raise HTTPException(status_code=400, detail="BP must use systolic/diastolic format, e.g. 120/80")
++ 
++     if any(value is not None for value in (payload.glucose, systolic_bp, diastolic_bp, payload.temperature)):
++         reading = HealthReading(
++             patient_id=payload.patient_id,
++             recorded_by=current_user.id,
++             glucose=payload.glucose,
++             systolic_bp=systolic_bp,
++             diastolic_bp=diastolic_bp,
++             temperature=payload.temperature,
++             notes=payload.note,
++         )
++         db.add(reading)
++     
++     # Log to caregiver_log
++     log = CaregiverLog(
++         patient_id=payload.patient_id,
++         caregiver_id=current_user.id,
++         log_type=LogType.VITALS,
++         summary=f"Manual vitals: {', '.join(filter(None, [f'BP {payload.bp}', f'Glucose {payload.glucose}', f'Temp {payload.temperature}']))}",
++         detail=payload.note
++     )
++     db.add(log)
++     await db.commit()
++     return {"ok": True}
++ 
++ @router.post("/notes")
++ async def add_note(
++     payload: NoteLog,
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db)
++ ):
++     log = CaregiverLog(
++         patient_id=payload.patient_id,
++         caregiver_id=current_user.id,
++         log_type=LogType.NOTE,
++         summary="Caregiver observation",
++         detail=payload.note
++     )
++     db.add(log)
++     await db.commit()
++     return {"ok": True}
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/api/v1/health_readings.py
+index 101bcfc,fd384d8..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/api/v1/health_readings.py
++++ b/CareSync-backend/app/api/v1/health_readings.py
+@@@ -1,327 -1,286 +1,616 @@@
+++<<<<<<< Updated upstream
+ +# app/api/v1/health_readings.py
+ +import os
+ +import uuid
+ +from datetime import datetime, timedelta
+ +from pathlib import Path
+ +from typing import List, Optional
+ +
+ +from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
+ +from sqlalchemy import select
+ +from sqlalchemy.ext.asyncio import AsyncSession
+ +from sqlalchemy.orm import selectinload      
+ +from app.core.dependencies import get_current_user
+ +from app.core.email import send_alert_email               # ← Week 4 addition
+ +from app.database import get_db
+ +from app.models.alert import Alert, AlertSeverity
+ +from app.models.health_reading import HealthReading
+ +from app.models.patient import PatientProfile, patient_caregiver, patient_doctor
+ +from app.models.user import User
+ +from app.schemas.health_reading import (
+ +    HealthReadingCreate,
+ +    HealthReadingResponse,
+ +    LatestVitalsResponse,
+ +    TrendPoint,
+ +    TrendResponse,
+ +)
+ +
+ +router = APIRouter(prefix="/health-readings", tags=["Health Readings"])
+ +
+ +
+ +#  Permission helper 
+ +
+ +async def _assert_can_access_patient(
+ +    patient: PatientProfile,
+ +    current_user: User,
+ +    db: AsyncSession,
+ +) -> None:
+ +    if current_user.role in ("super_admin", "admin"):
+ +        return
+ +
+ +    if current_user.role == "doctor":
+ +        result = await db.execute(
+ +            select(patient_doctor.c.patient_id).where(
+ +                patient_doctor.c.patient_id == patient.id,
+ +                patient_doctor.c.doctor_id == current_user.id,
+ +            )
+ +        )
+ +        if result.scalar_one_or_none() is None:
+ +            raise HTTPException(status_code=403, detail="Not assigned to this patient")
+ +        return
+ +
+ +    if current_user.role == "caregiver":
+ +        result = await db.execute(
+ +            select(patient_caregiver.c.patient_id).where(
+ +                patient_caregiver.c.patient_id == patient.id,
+ +                patient_caregiver.c.caregiver_id == current_user.id,
+ +            )
+ +        )
+ +        if result.scalar_one_or_none() is None:
+ +            raise HTTPException(status_code=403, detail="Not assigned to this patient")
+ +        return
+ +
+ +    if current_user.role == "patient":
+ +        if current_user.id != patient.user_id:
+ +            raise HTTPException(status_code=403, detail="Cannot access another patient's data")
+ +        return
+ +
+ +    raise HTTPException(status_code=403, detail="Not authorized")
+ +
+ +
+ +# Alert rule engine 
+ +
+ +def _evaluate_alerts(reading: HealthReading) -> list[Alert]:
+ +    alerts: list[Alert] = []
+ +
+ +    def alert(severity: AlertSeverity, message: str) -> Alert:
+ +        return Alert(
+ +            patient_id=reading.patient_id,
+ +            reading_id=reading.id,
+ +            severity=severity,
+ +            message=message,
+ +        )
+ +
+ +    if reading.systolic_bp is not None and reading.diastolic_bp is not None:
+ +        systolic = reading.systolic_bp
+ +        diastolic = reading.diastolic_bp
+ +        if systolic > 180 or diastolic > 120:
+ +            alerts.append(alert(AlertSeverity.CRITICAL, f"Hypertensive crisis: BP {systolic}/{diastolic} mmHg"))
+ +        elif systolic > 140 or diastolic > 90:
+ +            alerts.append(alert(AlertSeverity.WARNING, f"High blood pressure: {systolic}/{diastolic} mmHg"))
+ +        elif systolic < 90 or diastolic < 60:
+ +            alerts.append(alert(AlertSeverity.WARNING, f"Low blood pressure: {systolic}/{diastolic} mmHg"))
+ +
+ +    if reading.glucose is not None:
+ +        # Normalize: if value is likely mmol/L (<= 33), convert to mg/dL
+ +        glucose_mgdl = reading.glucose * 18 if reading.glucose <= 33 else reading.glucose
+ +        if glucose_mgdl > 200:
+ +            alerts.append(alert(AlertSeverity.WARNING, f"High glucose: {reading.glucose}"))
+ +        elif glucose_mgdl < 70:
+ +            alerts.append(alert(AlertSeverity.CRITICAL, f"Low glucose: {reading.glucose}"))
+ +
+ +
+ +    if reading.oxygen_saturation is not None and reading.oxygen_saturation < 92:
+ +        alerts.append(alert(AlertSeverity.CRITICAL, f"Low oxygen saturation: {reading.oxygen_saturation}%"))
+ +
+ +    if reading.heart_rate is not None:
+ +        if reading.heart_rate > 120:
+ +            alerts.append(alert(AlertSeverity.WARNING, f"High heart rate: {reading.heart_rate} bpm"))
+ +        elif reading.heart_rate < 40:
+ +            alerts.append(alert(AlertSeverity.CRITICAL, f"Dangerously low heart rate: {reading.heart_rate} bpm"))
+ +
+ +    if reading.temperature is not None and reading.temperature > 38.5:
+ +        alerts.append(alert(AlertSeverity.WARNING, f"Fever: {reading.temperature} C"))
+ +
+ +    return alerts
+ +
+ +
+ +#  Patient fetch helper 
+ +
+ +async def _get_active_patient_or_404(patient_id: uuid.UUID, db: AsyncSession) -> PatientProfile:
+ +    result = await db.execute(
+ +        select(PatientProfile).where(
+ +            PatientProfile.id == patient_id,
+ +            PatientProfile.is_active == True,
+ +        )
+ +    )
+ +    patient = result.scalar_one_or_none()
+ +    if not patient:
+ +        raise HTTPException(status_code=404, detail="Patient not found")
+ +    return patient
+ +
+ +
+ +#  Endpoints 
+ +
+ +@router.post("/", response_model=HealthReadingResponse, status_code=status.HTTP_201_CREATED)
+ +async def log_reading(
+ +    data: HealthReadingCreate,
+ +    background_tasks: BackgroundTasks,                     # ← Week 4 addition
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db),
+ +):
+ +    # Load patient with relationships needed for alert emails
+ +    result = await db.execute(                             # ← Week 4: replaced _get_active_patient_or_404
+ +        select(PatientProfile)
+ +        .where(PatientProfile.id == data.patient_id, PatientProfile.is_active == True)
+ +        .options(
+ +            selectinload(PatientProfile.doctors),
+ +            selectinload(PatientProfile.caregivers),
+ +            selectinload(PatientProfile.user),
+ +        )
+ +    )
+ +    patient = result.scalar_one_or_none()
+ +    if not patient:
+ +        raise HTTPException(status_code=404, detail="Patient not found")
+ +
+ +    await _assert_can_access_patient(patient, current_user, db)
+ +
+ +    reading = HealthReading(
+ +        patient_id=data.patient_id,
+ +        recorded_by=current_user.id,
+ +        recorded_at=data.recorded_at.replace(tzinfo=None) if data.recorded_at else datetime.utcnow(),
+ +        systolic_bp=data.systolic_bp,
+ +        diastolic_bp=data.diastolic_bp,
+ +        glucose=data.glucose,
+ +        weight=data.weight,
+ +        temperature=data.temperature,
+ +        oxygen_saturation=data.oxygen_saturation,
+ +        heart_rate=data.heart_rate,
+ +        symptoms=data.symptoms,
+ +        notes=data.notes,
+ +        photo_url=data.photo_url,
+ +    )
+ +    db.add(reading)
+ +    await db.flush()
+ +
+ +    # Fire alert rules and queue notification emails
+ +    patient_name = patient.user.full_name if patient.user else str(patient.id)
+ +    for triggered_alert in _evaluate_alerts(reading):
+ +        db.add(triggered_alert)
+ +        await db.flush()                                   # ← get alert.id for email link
+ +        recipients = list(patient.doctors) + list(patient.caregivers)
+ +        for recipient in recipients:
+ +            background_tasks.add_task(                     # ← non-blocking email send
+ +                send_alert_email,
+ +                to=recipient.email,
+ +                recipient_name=recipient.full_name,
+ +                patient_name=patient_name,
+ +                severity=triggered_alert.severity.value,
+ +                message=triggered_alert.message,
+ +                alert_id=str(triggered_alert.id),
+ +            )
+ +
+ +    await db.commit()
+ +    await db.refresh(reading)
+ +    return reading
+ +
+ +
+ +@router.post("/upload-photo", status_code=status.HTTP_200_OK)
+ +async def upload_photo(
+ +    file: UploadFile = File(...),
+ +    current_user: User = Depends(get_current_user),
+ +):
+ +    allowed_types = {"image/jpeg", "image/png", "image/webp"}
+ +    if file.content_type not in allowed_types:
+ +        raise HTTPException(
+ +            status_code=400,
+ +            detail=f"Unsupported file type: {file.content_type}. Use JPEG, PNG, or WebP.",
+ +        )
+ +
+ +    contents = await file.read()
+ +    max_size_mb = 10
+ +    if len(contents) > max_size_mb * 1024 * 1024:
+ +        raise HTTPException(status_code=400, detail=f"File too large. Max {max_size_mb} MB.")
+ +
+ +    suffix = Path(file.filename or ".jpg").suffix or ".jpg"
+ +    upload_dir = Path("uploads/photos")
+ +    os.makedirs(upload_dir, exist_ok=True)
+ +    filename = f"{uuid.uuid4()}{suffix}"
+ +    (upload_dir / filename).write_bytes(contents)
+ +
+ +    return {"photo_url": f"/static/photos/{filename}"}
+ +
+ +
+ +@router.get("/{patient_id}", response_model=List[HealthReadingResponse])
+ +async def get_reading_history(
+ +    patient_id: uuid.UUID,
+ +    skip: int = Query(0, ge=0),
+ +    limit: int = Query(50, ge=1, le=200),
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db),
+ +):
+ +    patient = await _get_active_patient_or_404(patient_id, db)
+ +    await _assert_can_access_patient(patient, current_user, db)
+ +
+ +    result = await db.execute(
+ +        select(HealthReading)
+ +        .where(HealthReading.patient_id == patient_id)
+ +        .order_by(HealthReading.recorded_at.desc())
+ +        .offset(skip)
+ +        .limit(limit)
+ +    )
+ +    return result.scalars().all()
+ +
+ +
+ +@router.get("/{patient_id}/latest", response_model=LatestVitalsResponse)
+ +async def get_latest_vitals(
+ +    patient_id: uuid.UUID,
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db),
+ +):
+ +    patient = await _get_active_patient_or_404(patient_id, db)
+ +    await _assert_can_access_patient(patient, current_user, db)
+ +
+ +    result = await db.execute(
+ +        select(HealthReading)
+ +        .where(HealthReading.patient_id == patient_id)
+ +        .order_by(HealthReading.recorded_at.desc())
+ +        .limit(100)
+ +    )
+ +    readings = result.scalars().all()
+ +
+ +    latest: dict = {}
+ +    last_updated: Optional[datetime] = None
+ +    vital_fields = [
+ +        "systolic_bp",
+ +        "diastolic_bp",
+ +        "glucose",
+ +        "weight",
+ +        "temperature",
+ +        "oxygen_saturation",
+ +        "heart_rate",
+ +    ]
+ +
+ +    for reading in readings:
+ +        for field in vital_fields:
+ +            if field not in latest and getattr(reading, field) is not None:
+ +                latest[field] = getattr(reading, field)
+ +                if last_updated is None or reading.recorded_at > last_updated:
+ +                    last_updated = reading.recorded_at
+ +        if all(field in latest for field in vital_fields):
+ +            break
+ +
+ +    return LatestVitalsResponse(patient_id=patient_id, last_updated=last_updated, **latest)
+ +
+ +
+ +VITAL_MAP = {
+ +    "systolic_bp":       (HealthReading.systolic_bp,       "mmHg"),
+ +    "diastolic_bp":      (HealthReading.diastolic_bp,      "mmHg"),
+ +    "glucose":           (HealthReading.glucose,           "mg/dL"),
+ +    "weight":            (HealthReading.weight,            "kg"),
+ +    "temperature":       (HealthReading.temperature,       "C"),
+ +    "oxygen_saturation": (HealthReading.oxygen_saturation, "%"),
+ +    "heart_rate":        (HealthReading.heart_rate,        "bpm"),
+ +}
+ +
+ +
+ +@router.get("/{patient_id}/trend/{vital}", response_model=TrendResponse)
+ +async def get_trend(
+ +    patient_id: uuid.UUID,
+ +    vital: str,
+ +    days: int = Query(30, ge=1, le=365),
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db),
+ +):
+ +    if vital not in VITAL_MAP:
+ +        raise HTTPException(status_code=400, detail=f"Unknown vital '{vital}'. Choose from: {', '.join(VITAL_MAP)}")
+ +
+ +    patient = await _get_active_patient_or_404(patient_id, db)
+ +    await _assert_can_access_patient(patient, current_user, db)
+ +
+ +    column, unit = VITAL_MAP[vital]
+ +    cutoff = datetime.utcnow() - timedelta(days=days)
+ +    result = await db.execute(
+ +        select(HealthReading.recorded_at, column)
+ +        .where(
+ +            HealthReading.patient_id == patient_id,
+ +            column.isnot(None),
+ +            HealthReading.recorded_at >= cutoff,
+ +        )
+ +        .order_by(HealthReading.recorded_at.asc())
+ +    )
+ +
+ +    return TrendResponse(
+ +        patient_id=patient_id,
+ +        vital=vital,
+ +        unit=unit,
+ +        data=[TrendPoint(recorded_at=row[0], value=float(row[1])) for row in result.all()],
+-     )
+++    )
+++=======
++ import os
++ import uuid
++ from datetime import datetime, timedelta
++ from pathlib import Path
++ from typing import List, Optional
++ 
++ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
++ from sqlalchemy import select
++ from sqlalchemy.ext.asyncio import AsyncSession
++ 
++ from app.core.dependencies import get_current_user
++ from app.database import get_db
++ from app.models.alert import Alert, AlertSeverity
++ from app.models.health_reading import HealthReading
++ from app.models.patient import PatientProfile, patient_caregiver, patient_doctor
++ from app.models.user import User
++ from app.schemas.health_reading import (
++     HealthReadingCreate,
++     HealthReadingResponse,
++     LatestVitalsResponse,
++     TrendPoint,
++     TrendResponse,
++ )
++ 
++ router = APIRouter(prefix="/health-readings", tags=["Health Readings"])
++ 
++ 
++ async def _assert_can_access_patient(
++     patient: PatientProfile,
++     current_user: User,
++     db: AsyncSession,
++ ) -> None:
++     if current_user.role in ("super_admin", "admin"):
++         return
++ 
++     if current_user.role == "doctor":
++         result = await db.execute(
++             select(patient_doctor.c.patient_id).where(
++                 patient_doctor.c.patient_id == patient.id,
++                 patient_doctor.c.doctor_id == current_user.id,
++             )
++         )
++         if result.scalar_one_or_none() is None:
++             raise HTTPException(status_code=403, detail="Not assigned to this patient")
++         return
++ 
++     if current_user.role == "caregiver":
++         result = await db.execute(
++             select(patient_caregiver.c.patient_id).where(
++                 patient_caregiver.c.patient_id == patient.id,
++                 patient_caregiver.c.caregiver_id == current_user.id,
++             )
++         )
++         if result.scalar_one_or_none() is None:
++             raise HTTPException(status_code=403, detail="Not assigned to this patient")
++         return
++ 
++     if current_user.role == "patient":
++         if current_user.id != patient.user_id:
++             raise HTTPException(status_code=403, detail="Cannot access another patient's data")
++         return
++ 
++     raise HTTPException(status_code=403, detail="Not authorized")
++ 
++ 
++ def _evaluate_alerts(reading: HealthReading) -> list[Alert]:
++     alerts: list[Alert] = []
++ 
++     def alert(severity: AlertSeverity, message: str) -> Alert:
++         return Alert(
++             patient_id=reading.patient_id,
++             reading_id=reading.id,
++             severity=severity,
++             message=message,
++         )
++ 
++     if reading.systolic_bp is not None and reading.diastolic_bp is not None:
++         systolic = reading.systolic_bp
++         diastolic = reading.diastolic_bp
++         if systolic > 180 or diastolic > 120:
++             alerts.append(alert(AlertSeverity.CRITICAL, f"Hypertensive crisis: BP {systolic}/{diastolic} mmHg"))
++         elif systolic > 140 or diastolic > 90:
++             alerts.append(alert(AlertSeverity.WARNING, f"High blood pressure: {systolic}/{diastolic} mmHg"))
++         elif systolic < 90 or diastolic < 60:
++             alerts.append(alert(AlertSeverity.WARNING, f"Low blood pressure: {systolic}/{diastolic} mmHg"))
++ 
++     if reading.glucose is not None:
++         if reading.glucose > 200:
++             alerts.append(alert(AlertSeverity.WARNING, f"High glucose: {reading.glucose} mg/dL"))
++         elif reading.glucose < 70:
++             alerts.append(alert(AlertSeverity.CRITICAL, f"Low glucose: {reading.glucose} mg/dL"))
++ 
++     if reading.oxygen_saturation is not None and reading.oxygen_saturation < 92:
++         alerts.append(alert(AlertSeverity.CRITICAL, f"Low oxygen saturation: {reading.oxygen_saturation}%"))
++ 
++     if reading.heart_rate is not None:
++         if reading.heart_rate > 120:
++             alerts.append(alert(AlertSeverity.WARNING, f"High heart rate: {reading.heart_rate} bpm"))
++         elif reading.heart_rate < 40:
++             alerts.append(alert(AlertSeverity.CRITICAL, f"Dangerously low heart rate: {reading.heart_rate} bpm"))
++ 
++     if reading.temperature is not None and reading.temperature > 38.5:
++         alerts.append(alert(AlertSeverity.WARNING, f"Fever: {reading.temperature} C"))
++ 
++     return alerts
++ 
++ 
++ async def _get_active_patient_or_404(patient_id: uuid.UUID, db: AsyncSession) -> PatientProfile:
++     result = await db.execute(
++         select(PatientProfile).where(
++             PatientProfile.id == patient_id,
++             PatientProfile.is_active == True,
++         )
++     )
++     patient = result.scalar_one_or_none()
++     if not patient:
++         raise HTTPException(status_code=404, detail="Patient not found")
++     return patient
++ 
++ 
++ @router.post("/", response_model=HealthReadingResponse, status_code=status.HTTP_201_CREATED)
++ async def log_reading(
++     data: HealthReadingCreate,
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db),
++ ):
++     patient = await _get_active_patient_or_404(data.patient_id, db)
++     await _assert_can_access_patient(patient, current_user, db)
++ 
++     reading = HealthReading(
++         patient_id=data.patient_id,
++         recorded_by=current_user.id,
++         recorded_at=data.recorded_at or datetime.utcnow(),
++         systolic_bp=data.systolic_bp,
++         diastolic_bp=data.diastolic_bp,
++         glucose=data.glucose,
++         weight=data.weight,
++         temperature=data.temperature,
++         oxygen_saturation=data.oxygen_saturation,
++         heart_rate=data.heart_rate,
++         symptoms=data.symptoms,
++         notes=data.notes,
++         photo_url=data.photo_url,
++     )
++     db.add(reading)
++     await db.flush()
++ 
++     for triggered_alert in _evaluate_alerts(reading):
++         db.add(triggered_alert)
++ 
++     await db.commit()
++     await db.refresh(reading)
++     return reading
++ 
++ 
++ @router.post("/upload-photo", status_code=status.HTTP_200_OK)
++ async def upload_photo(
++     file: UploadFile = File(...),
++     current_user: User = Depends(get_current_user),
++ ):
++     allowed_types = {"image/jpeg", "image/png", "image/webp"}
++     if file.content_type not in allowed_types:
++         raise HTTPException(
++             status_code=400,
++             detail=f"Unsupported file type: {file.content_type}. Use JPEG, PNG, or WebP.",
++         )
++ 
++     contents = await file.read()
++     max_size_mb = 10
++     if len(contents) > max_size_mb * 1024 * 1024:
++         raise HTTPException(status_code=400, detail=f"File too large. Max {max_size_mb} MB.")
++ 
++     suffix = Path(file.filename or ".jpg").suffix or ".jpg"
++     upload_dir = Path("uploads/photos")
++     os.makedirs(upload_dir, exist_ok=True)
++     filename = f"{uuid.uuid4()}{suffix}"
++     (upload_dir / filename).write_bytes(contents)
++ 
++     return {"photo_url": f"/static/photos/{filename}"}
++ 
++ 
++ @router.get("/{patient_id}", response_model=List[HealthReadingResponse])
++ async def get_reading_history(
++     patient_id: uuid.UUID,
++     skip: int = Query(0, ge=0),
++     limit: int = Query(50, ge=1, le=200),
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db),
++ ):
++     patient = await _get_active_patient_or_404(patient_id, db)
++     await _assert_can_access_patient(patient, current_user, db)
++ 
++     result = await db.execute(
++         select(HealthReading)
++         .where(HealthReading.patient_id == patient_id)
++         .order_by(HealthReading.recorded_at.desc())
++         .offset(skip)
++         .limit(limit)
++     )
++     return result.scalars().all()
++ 
++ 
++ @router.get("/{patient_id}/latest", response_model=LatestVitalsResponse)
++ async def get_latest_vitals(
++     patient_id: uuid.UUID,
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db),
++ ):
++     patient = await _get_active_patient_or_404(patient_id, db)
++     await _assert_can_access_patient(patient, current_user, db)
++ 
++     result = await db.execute(
++         select(HealthReading)
++         .where(HealthReading.patient_id == patient_id)
++         .order_by(HealthReading.recorded_at.desc())
++         .limit(100)
++     )
++     readings = result.scalars().all()
++ 
++     latest: dict = {}
++     last_updated: Optional[datetime] = None
++     vital_fields = [
++         "systolic_bp",
++         "diastolic_bp",
++         "glucose",
++         "weight",
++         "temperature",
++         "oxygen_saturation",
++         "heart_rate",
++     ]
++ 
++     for reading in readings:
++         for field in vital_fields:
++             if field not in latest and getattr(reading, field) is not None:
++                 latest[field] = getattr(reading, field)
++                 if last_updated is None or reading.recorded_at > last_updated:
++                     last_updated = reading.recorded_at
++         if all(field in latest for field in vital_fields):
++             break
++ 
++     return LatestVitalsResponse(patient_id=patient_id, last_updated=last_updated, **latest)
++ 
++ 
++ VITAL_MAP = {
++     "systolic_bp": (HealthReading.systolic_bp, "mmHg"),
++     "diastolic_bp": (HealthReading.diastolic_bp, "mmHg"),
++     "glucose": (HealthReading.glucose, "mg/dL"),
++     "weight": (HealthReading.weight, "kg"),
++     "temperature": (HealthReading.temperature, "C"),
++     "oxygen_saturation": (HealthReading.oxygen_saturation, "%"),
++     "heart_rate": (HealthReading.heart_rate, "bpm"),
++ }
++ 
++ 
++ @router.get("/{patient_id}/trend/{vital}", response_model=TrendResponse)
++ async def get_trend(
++     patient_id: uuid.UUID,
++     vital: str,
++     days: int = Query(30, ge=1, le=365),
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db),
++ ):
++     if vital not in VITAL_MAP:
++         raise HTTPException(status_code=400, detail=f"Unknown vital '{vital}'. Choose from: {', '.join(VITAL_MAP)}")
++ 
++     patient = await _get_active_patient_or_404(patient_id, db)
++     await _assert_can_access_patient(patient, current_user, db)
++ 
++     column, unit = VITAL_MAP[vital]
++     cutoff = datetime.utcnow() - timedelta(days=days)
++     result = await db.execute(
++         select(HealthReading.recorded_at, column)
++         .where(
++             HealthReading.patient_id == patient_id,
++             column.isnot(None),
++             HealthReading.recorded_at >= cutoff,
++         )
++         .order_by(HealthReading.recorded_at.asc())
++     )
++ 
++     return TrendResponse(
++         patient_id=patient_id,
++         vital=vital,
++         unit=unit,
++         data=[TrendPoint(recorded_at=row[0], value=float(row[1])) for row in result.all()],
++     )
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/api/v1/patients.py
+index 187e980,e35ee3e..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/api/v1/patients.py
++++ b/CareSync-backend/app/api/v1/patients.py
+@@@ -1,300 -1,283 +1,585 @@@
+++<<<<<<< Updated upstream
+ +from fastapi import APIRouter, Depends, HTTPException, status, Query
+ +from sqlalchemy.ext.asyncio import AsyncSession
+ +from sqlalchemy import select, func, or_, and_
+ +from sqlalchemy.orm import selectinload
+ +from uuid import UUID
+ +from typing import List, Optional
+ +from app.database import get_db
+ +from app.models.user import User
+ +from app.models.patient import PatientProfile, patient_doctor, patient_caregiver
+ +from app.schemas.patient import (
+ +    PatientProfileCreate, PatientProfileUpdate,
+ +    PatientProfileResponse, PatientWithUserResponse, PatientListParams
+ +)
+ +from app.core.dependencies import get_current_user, require_admin, get_agency_id_from_user
+ +
+ +router = APIRouter(prefix="/patients", tags=["Patients"])
+ +
+ +async def get_patient_with_relationships(db: AsyncSession, patient_id: UUID):
+ +    stmt = select(PatientProfile).where(
+ +        PatientProfile.id == patient_id,
+ +        PatientProfile.is_active == True
+ +    ).options(
+ +        selectinload(PatientProfile.user),
+ +        selectinload(PatientProfile.doctors),
+ +        selectinload(PatientProfile.caregivers)
+ +    )
+ +    result = await db.execute(stmt)
+ +    return result.scalar_one_or_none()
+ +
+ +@router.post("/", response_model=PatientProfileResponse, status_code=status.HTTP_201_CREATED)
+ +async def create_patient(
+ +    data: PatientProfileCreate,
+ +    current_user: User = Depends(require_admin),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    user_stmt = select(User).where(User.id == data.user_id, func.lower(User.role) == "patient")
+ +    user_result = await db.execute(user_stmt)
+ +    patient_user = user_result.scalar_one_or_none()
+ +    if not patient_user:
+ +        raise HTTPException(status_code=404, detail="User with role 'patient' not found")
+ +
+ +    existing = await db.execute(select(PatientProfile).where(PatientProfile.user_id == data.user_id))
+ +    if existing.scalar_one_or_none():
+ +        raise HTTPException(status_code=400, detail="Patient profile already exists for this user")
+ +
+ +    if current_user.role != "super_admin":
+ +        if patient_user.agency_id != current_user.agency_id:
+ +            raise HTTPException(status_code=403, detail="Cannot create patient profile for user from another agency")
+ +
+ +    new_profile = PatientProfile(**data.model_dump())
+ +    db.add(new_profile)
+ +    await db.commit()
+ +    await db.refresh(new_profile)
+ +    return new_profile
+ +
+ +@router.get("/", response_model=List[PatientWithUserResponse])
+ +async def list_patients(
+ +    skip: int = Query(0, ge=0),
+ +    limit: int = Query(100, ge=1, le=500),
+ +    search: Optional[str] = None,
+ +    doctor_id: Optional[UUID] = None,
+ +    caregiver_id: Optional[UUID] = None,
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db),
+ +    agency_id: Optional[UUID] = Depends(get_agency_id_from_user)
+ +):
+ +    stmt = select(PatientProfile).where(PatientProfile.is_active == True)
+ +
+ +    if current_user.role != "super_admin":
+ +        stmt = stmt.join(User, PatientProfile.user_id == User.id).where(User.agency_id == current_user.agency_id)
+ +    elif agency_id:
+ +        stmt = stmt.join(User, PatientProfile.user_id == User.id).where(User.agency_id == agency_id)
+ +
+ +    if doctor_id:
+ +        stmt = stmt.join(patient_doctor, patient_doctor.c.patient_id == PatientProfile.id).where(patient_doctor.c.doctor_id == doctor_id)
+ +    if caregiver_id:
+ +        stmt = stmt.join(patient_caregiver, patient_caregiver.c.patient_id == PatientProfile.id).where(patient_caregiver.c.caregiver_id == caregiver_id)
+ +
+ +    if search:
+ +        stmt = stmt.where(
+ +            or_(
+ +                User.full_name.ilike(f"%{search}%"),
+ +                User.email.ilike(f"%{search}%")
+ +            )
+ +        )
+ +
+ +    stmt = stmt.offset(skip).limit(limit).options(
+ +        selectinload(PatientProfile.user),
+ +        selectinload(PatientProfile.doctors),
+ +        selectinload(PatientProfile.caregivers)
+ +    )
+ +    result = await db.execute(stmt)
+ +    patients = result.scalars().all()
+ +
+ +    response = []
+ +    for p in patients:
+ +        response.append(PatientWithUserResponse(
+ +            id=p.id,
+ +            user_id=p.user_id,
+ +            is_active=p.is_active,
+ +            date_of_birth=p.date_of_birth,
+ +            gender=p.gender,
+ +            blood_type=p.blood_type,
+ +            allergies=p.allergies,
+ +            chronic_conditions=p.chronic_conditions,
+ +            emergency_contact_name=p.emergency_contact_name,
+ +            emergency_contact_phone=p.emergency_contact_phone,
+ +            user_email=p.user.email,
+ +            user_full_name=p.user.full_name,
+ +            doctors=[d.id for d in p.doctors],
+ +            caregivers=[c.id for c in p.caregivers]
+ +        ))
+ +    return response
+ +
+ +@router.get("/{patient_id}", response_model=PatientWithUserResponse)
+ +async def get_patient(
+ +    patient_id: UUID,
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    patient = await get_patient_with_relationships(db, patient_id)
+ +    if not patient:
+ +        raise HTTPException(status_code=404, detail="Patient not found")
+ +
+ +    if current_user.role not in ["super_admin", "admin"]:
+ +        if current_user.role == "doctor":
+ +            if current_user not in patient.doctors:
+ +                raise HTTPException(status_code=403, detail="Not authorized to view this patient")
+ +        elif current_user.role == "caregiver":
+ +            if current_user not in patient.caregivers:
+ +                raise HTTPException(status_code=403, detail="Not authorized to view this patient")
+ +        elif current_user.id != patient.user_id:
+ +            raise HTTPException(status_code=403, detail="Not authorized")
+ +
+ +    return PatientWithUserResponse(
+ +        id=patient.id,
+ +        user_id=patient.user_id,
+ +        is_active=patient.is_active,
+ +        date_of_birth=patient.date_of_birth,
+ +        gender=patient.gender,
+ +        blood_type=patient.blood_type,
+ +        allergies=patient.allergies,
+ +        chronic_conditions=patient.chronic_conditions,
+ +        emergency_contact_name=patient.emergency_contact_name,
+ +        emergency_contact_phone=patient.emergency_contact_phone,
+ +        user_email=patient.user.email,
+ +        user_full_name=patient.user.full_name,
+ +        doctors=[d.id for d in patient.doctors],
+ +        caregivers=[c.id for c in patient.caregivers]
+ +    )
+ +
+ +@router.put("/{patient_id}", response_model=PatientProfileResponse)
+ +async def update_patient(
+ +    patient_id: UUID,
+ +    data: PatientProfileUpdate,
+ +    current_user: User = Depends(require_admin),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    patient = await db.get(PatientProfile, patient_id)
+ +    if not patient or not patient.is_active:
+ +        raise HTTPException(status_code=404, detail="Patient not found")
+ +
+ +    if current_user.role != "super_admin":
+ +        user_stmt = select(User).where(User.id == patient.user_id)
+ +        user_res = await db.execute(user_stmt)
+ +        patient_user = user_res.scalar_one()
+ +        if patient_user.agency_id != current_user.agency_id:
+ +            raise HTTPException(status_code=403, detail="Cannot update patient from another agency")
+ +
+ +    for field, value in data.model_dump(exclude_unset=True).items():
+ +        setattr(patient, field, value)
+ +
+ +    await db.commit()
+ +    await db.refresh(patient)
+ +    return patient
+ +
+ +@router.delete("/{patient_id}", status_code=204)
+ +async def delete_patient(
+ +    patient_id: UUID,
+ +    current_user: User = Depends(require_admin),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    patient = await db.get(PatientProfile, patient_id)
+ +    if not patient:
+ +        raise HTTPException(status_code=404, detail="Patient not found")
+ +    if current_user.role != "super_admin":
+ +        user_stmt = select(User).where(User.id == patient.user_id)
+ +        user_res = await db.execute(user_stmt)
+ +        patient_user = user_res.scalar_one()
+ +        if patient_user.agency_id != current_user.agency_id:
+ +            raise HTTPException(status_code=403, detail="Cannot delete patient from another agency")
+ +    await db.delete(patient)
+ +    await db.commit()
+ +    return None
+ +
+ +@router.post("/{patient_id}/doctors/{doctor_id}", status_code=204)
+ +async def assign_doctor(
+ +    patient_id: UUID,
+ +    doctor_id: UUID,
+ +    current_user: User = Depends(require_admin),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    stmt = (
+ +        select(PatientProfile)
+ +        .where(PatientProfile.id == patient_id)
+ +        .options(selectinload(PatientProfile.doctors))
+ +    )
+ +    result = await db.execute(stmt)
+ +    patient = result.scalar_one_or_none()
+ +    if not patient:
+ +        raise HTTPException(status_code=404, detail="Patient not found")
+ +
+ +    doctor = await db.get(User, doctor_id)
+ +    if not doctor or doctor.role.lower() != "doctor":
+ +        raise HTTPException(status_code=404, detail="Doctor not found")
+ +
+ +    if current_user.role != "super_admin":
+ +        if doctor.agency_id != current_user.agency_id or patient.user.agency_id != current_user.agency_id:
+ +            raise HTTPException(status_code=403, detail="Agency mismatch")
+ +
+ +    if doctor not in patient.doctors:
+ +        patient.doctors.append(doctor)
+ +        await db.commit()
+ +    return None
+ +
+ +@router.delete("/{patient_id}/doctors/{doctor_id}", status_code=204)
+ +async def remove_doctor(
+ +    patient_id: UUID,
+ +    doctor_id: UUID,
+ +    current_user: User = Depends(require_admin),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    stmt = (
+ +        select(PatientProfile)
+ +        .where(PatientProfile.id == patient_id)
+ +        .options(selectinload(PatientProfile.doctors))
+ +    )
+ +    result = await db.execute(stmt)
+ +    patient = result.scalar_one_or_none()
+ +    if not patient:
+ +        raise HTTPException(status_code=404, detail="Patient not found")
+ +
+ +    doctor = await db.get(User, doctor_id)
+ +    if doctor in patient.doctors:
+ +        patient.doctors.remove(doctor)
+ +        await db.commit()
+ +    return None
+ +
+ +@router.post("/{patient_id}/caregivers/{caregiver_id}", status_code=204)
+ +async def assign_caregiver(
+ +    patient_id: UUID,
+ +    caregiver_id: UUID,
+ +    current_user: User = Depends(require_admin),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    stmt = (
+ +        select(PatientProfile)
+ +        .where(PatientProfile.id == patient_id)
+ +        .options(selectinload(PatientProfile.caregivers))
+ +    )
+ +    result = await db.execute(stmt)
+ +    patient = result.scalar_one_or_none()
+ +    if not patient:
+ +        raise HTTPException(status_code=404, detail="Patient not found")
+ +
+ +    caregiver = await db.get(User, caregiver_id)
+ +    if not caregiver or caregiver.role.lower() != "caregiver":
+ +        raise HTTPException(status_code=404, detail="Caregiver not found")
+ +
+ +    if current_user.role != "super_admin":
+ +        if caregiver.agency_id != current_user.agency_id or patient.user.agency_id != current_user.agency_id:
+ +            raise HTTPException(status_code=403, detail="Agency mismatch")
+ +
+ +    if caregiver not in patient.caregivers:
+ +        patient.caregivers.append(caregiver)
+ +        await db.commit()
+ +    return None
+ +
+ +@router.delete("/{patient_id}/caregivers/{caregiver_id}", status_code=204)
+ +async def remove_caregiver(
+ +    patient_id: UUID,
+ +    caregiver_id: UUID,
+ +    current_user: User = Depends(require_admin),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    stmt = (
+ +        select(PatientProfile)
+ +        .where(PatientProfile.id == patient_id)
+ +        .options(selectinload(PatientProfile.caregivers))
+ +    )
+ +    result = await db.execute(stmt)
+ +    patient = result.scalar_one_or_none()
+ +    if not patient:
+ +        raise HTTPException(status_code=404, detail="Patient not found")
+ +
+ +    caregiver = await db.get(User, caregiver_id)
+ +    if caregiver in patient.caregivers:
+ +        patient.caregivers.remove(caregiver)
+ +        await db.commit()
+++=======
++ from fastapi import APIRouter, Depends, HTTPException, status, Query
++ from sqlalchemy.ext.asyncio import AsyncSession
++ from sqlalchemy import select, func, or_, and_
++ from sqlalchemy.orm import selectinload
++ from uuid import UUID
++ from typing import List, Optional
++ from app.database import get_db
++ from app.models.user import User
++ from app.models.patient import PatientProfile, patient_doctor, patient_caregiver
++ from app.schemas.patient import (
++     PatientProfileCreate, PatientProfileUpdate,
++     PatientProfileResponse, PatientWithUserResponse, PatientListParams
++ )
++ from app.core.dependencies import get_current_user, require_admin, get_agency_id_from_user
++ 
++ router = APIRouter(prefix="/patients", tags=["Patients"])
++ 
++ async def get_patient_with_relationships(db: AsyncSession, patient_id: UUID):
++     stmt = select(PatientProfile).where(
++         PatientProfile.id == patient_id,
++         PatientProfile.is_active == True
++     ).options(
++         selectinload(PatientProfile.user),
++         selectinload(PatientProfile.doctors),
++         selectinload(PatientProfile.caregivers)
++     )
++     result = await db.execute(stmt)
++     return result.scalar_one_or_none()
++ 
++ @router.post("/", response_model=PatientProfileResponse, status_code=status.HTTP_201_CREATED)
++ async def create_patient(
++     data: PatientProfileCreate,
++     current_user: User = Depends(require_admin),  # Only admins can create patient profiles
++     db: AsyncSession = Depends(get_db)
++ ):
++     # Verify that the user exists and has role 'patient'
++     user_stmt = select(User).where(User.id == data.user_id, User.role == "patient")
++     user_result = await db.execute(user_stmt)
++     patient_user = user_result.scalar_one_or_none()
++     if not patient_user:
++         raise HTTPException(status_code=404, detail="User with role 'patient' not found")
++ 
++     # Check if patient profile already exists for this user
++     existing = await db.execute(select(PatientProfile).where(PatientProfile.user_id == data.user_id))
++     if existing.scalar_one_or_none():
++         raise HTTPException(status_code=400, detail="Patient profile already exists for this user")
++ 
++     # Admins can only create patients within their agency (or super admin can do cross-agency)
++     if current_user.role != "super_admin":
++         if patient_user.agency_id != current_user.agency_id:
++             raise HTTPException(status_code=403, detail="Cannot create patient profile for user from another agency")
++ 
++     new_profile = PatientProfile(**data.model_dump())
++     db.add(new_profile)
++     await db.commit()
++     await db.refresh(new_profile)
++     return new_profile
++ 
++ @router.get("/", response_model=List[PatientWithUserResponse])
++ async def list_patients(
++     skip: int = Query(0, ge=0),
++     limit: int = Query(100, ge=1, le=500),
++     search: Optional[str] = None,
++     doctor_id: Optional[UUID] = None,
++     caregiver_id: Optional[UUID] = None,
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db),
++     agency_id: Optional[UUID] = Depends(get_agency_id_from_user)
++ ):
++     # Build base query with joins
++     stmt = select(PatientProfile).where(PatientProfile.is_active == True)
++ 
++     # Agency isolation: if not super_admin, filter by agency_id (via user.agency_id)
++     if current_user.role != "super_admin":
++         stmt = stmt.join(User, PatientProfile.user_id == User.id).where(User.agency_id == current_user.agency_id)
++     elif agency_id:
++         stmt = stmt.join(User, PatientProfile.user_id == User.id).where(User.agency_id == agency_id)
++ 
++     # Filtering by doctor or caregiver
++     if doctor_id:
++         stmt = stmt.join(patient_doctor, patient_doctor.c.patient_id == PatientProfile.id).where(patient_doctor.c.doctor_id == doctor_id)
++     if caregiver_id:
++         stmt = stmt.join(patient_caregiver, patient_caregiver.c.patient_id == PatientProfile.id).where(patient_caregiver.c.caregiver_id == caregiver_id)
++ 
++     # Search by patient name or email
++     if search:
++         stmt = stmt.join(User, PatientProfile.user_id == User.id).where(
++             or_(
++                 User.full_name.ilike(f"%{search}%"),
++                 User.email.ilike(f"%{search}%")
++             )
++         )
++ 
++     # Apply pagination
++     stmt = stmt.offset(skip).limit(limit).options(
++         selectinload(PatientProfile.user),
++         selectinload(PatientProfile.doctors),
++         selectinload(PatientProfile.caregivers)
++     )
++     result = await db.execute(stmt)
++     patients = result.scalars().all()
++ 
++     # Build response including user details and doctor/caregiver IDs
++     response = []
++     for p in patients:
++         response.append(PatientWithUserResponse(
++             id=p.id,
++             user_id=p.user_id,
++             is_active=p.is_active,
++             date_of_birth=p.date_of_birth,
++             gender=p.gender,
++             blood_type=p.blood_type,
++             allergies=p.allergies,
++             chronic_conditions=p.chronic_conditions,
++             emergency_contact_name=p.emergency_contact_name,
++             emergency_contact_phone=p.emergency_contact_phone,
++             user_email=p.user.email,
++             user_full_name=p.user.full_name,
++             doctors=[d.id for d in p.doctors],
++             caregivers=[c.id for c in p.caregivers]
++         ))
++     return response
++ 
++ @router.get("/{patient_id}", response_model=PatientWithUserResponse)
++ async def get_patient(
++     patient_id: UUID,
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db)
++ ):
++     patient = await get_patient_with_relationships(db, patient_id)
++     if not patient:
++         raise HTTPException(status_code=404, detail="Patient not found")
++ 
++     # Permission check
++     if current_user.role not in ["super_admin", "admin"]:
++         # Doctor can see if assigned, caregiver can see if assigned
++         if current_user.role == "doctor":
++             if current_user not in patient.doctors:
++                 raise HTTPException(status_code=403, detail="Not authorized to view this patient")
++         elif current_user.role == "caregiver":
++             if current_user not in patient.caregivers:
++                 raise HTTPException(status_code=403, detail="Not authorized to view this patient")
++         elif current_user.id != patient.user_id:  # patient themselves
++             raise HTTPException(status_code=403, detail="Not authorized")
++ 
++     return PatientWithUserResponse(
++         id=patient.id,
++         user_id=patient.user_id,
++         is_active=patient.is_active,
++         date_of_birth=patient.date_of_birth,
++         gender=patient.gender,
++         blood_type=patient.blood_type,
++         allergies=patient.allergies,
++         chronic_conditions=patient.chronic_conditions,
++         emergency_contact_name=patient.emergency_contact_name,
++         emergency_contact_phone=patient.emergency_contact_phone,
++         user_email=patient.user.email,
++         user_full_name=patient.user.full_name,
++         doctors=[d.id for d in patient.doctors],
++         caregivers=[c.id for c in patient.caregivers]
++     )
++ 
++ @router.put("/{patient_id}", response_model=PatientProfileResponse)
++ async def update_patient(
++     patient_id: UUID,
++     data: PatientProfileUpdate,
++     current_user: User = Depends(require_admin),  # Only admins can update profile details
++     db: AsyncSession = Depends(get_db)
++ ):
++     patient = await db.get(PatientProfile, patient_id)
++     if not patient or not patient.is_active:
++         raise HTTPException(status_code=404, detail="Patient not found")
++ 
++     # Check agency permission (admin within same agency or super admin)
++     if current_user.role != "super_admin":
++         user_stmt = select(User).where(User.id == patient.user_id)
++         user_res = await db.execute(user_stmt)
++         patient_user = user_res.scalar_one()
++         if patient_user.agency_id != current_user.agency_id:
++             raise HTTPException(status_code=403, detail="Cannot update patient from another agency")
++ 
++     for field, value in data.model_dump(exclude_unset=True).items():
++         setattr(patient, field, value)
++ 
++     await db.commit()
++     await db.refresh(patient)
++     return patient
++ 
++ @router.delete("/{patient_id}", status_code=204)
++ async def delete_patient(
++     patient_id: UUID,
++     current_user: User = Depends(require_admin),
++     db: AsyncSession = Depends(get_db)
++ ):
++     patient = await db.get(PatientProfile, patient_id)
++     if not patient:
++         raise HTTPException(status_code=404, detail="Patient not found")
++     if current_user.role != "super_admin":
++         user_stmt = select(User).where(User.id == patient.user_id)
++         user_res = await db.execute(user_stmt)
++         patient_user = user_res.scalar_one()
++         if patient_user.agency_id != current_user.agency_id:
++             raise HTTPException(status_code=403, detail="Cannot delete patient from another agency")
++     await db.delete(patient)
++     await db.commit()
++     return None
++ 
++ # Additional endpoints to assign doctors/caregivers
++ @router.post("/{patient_id}/doctors/{doctor_id}", status_code=204)
++ async def assign_doctor(
++     patient_id: UUID,
++     doctor_id: UUID,
++     current_user: User = Depends(require_admin),
++     db: AsyncSession = Depends(get_db)
++ ):
++     patient = await db.get(PatientProfile, patient_id)
++     if not patient:
++         raise HTTPException(status_code=404, detail="Patient not found")
++     doctor = await db.get(User, doctor_id)
++     if not doctor or doctor.role != "doctor":
++         raise HTTPException(status_code=404, detail="Doctor not found")
++     # Check agency
++     if current_user.role != "super_admin":
++         if doctor.agency_id != current_user.agency_id or patient.user.agency_id != current_user.agency_id:
++             raise HTTPException(status_code=403, detail="Agency mismatch")
++     if doctor not in patient.doctors:
++         patient.doctors.append(doctor)
++         await db.commit()
++     return None
++ 
++ @router.delete("/{patient_id}/doctors/{doctor_id}", status_code=204)
++ async def remove_doctor(
++     patient_id: UUID,
++     doctor_id: UUID,
++     current_user: User = Depends(require_admin),
++     db: AsyncSession = Depends(get_db)
++ ):
++     patient = await db.get(PatientProfile, patient_id)
++     if not patient:
++         raise HTTPException(status_code=404, detail="Patient not found")
++     doctor = await db.get(User, doctor_id)
++     if doctor in patient.doctors:
++         patient.doctors.remove(doctor)
++         await db.commit()
++     return None
++ 
++ # Similar for caregivers
++ @router.post("/{patient_id}/caregivers/{caregiver_id}", status_code=204)
++ async def assign_caregiver(
++     patient_id: UUID,
++     caregiver_id: UUID,
++     current_user: User = Depends(require_admin),
++     db: AsyncSession = Depends(get_db)
++ ):
++     patient = await db.get(PatientProfile, patient_id)
++     if not patient:
++         raise HTTPException(status_code=404, detail="Patient not found")
++     caregiver = await db.get(User, caregiver_id)
++     if not caregiver or caregiver.role != "caregiver":
++         raise HTTPException(status_code=404, detail="Caregiver not found")
++     if current_user.role != "super_admin":
++         if caregiver.agency_id != current_user.agency_id or patient.user.agency_id != current_user.agency_id:
++             raise HTTPException(status_code=403, detail="Agency mismatch")
++     if caregiver not in patient.caregivers:
++         patient.caregivers.append(caregiver)
++         await db.commit()
++     return None
++ 
++ @router.delete("/{patient_id}/caregivers/{caregiver_id}", status_code=204)
++ async def remove_caregiver(
++     patient_id: UUID,
++     caregiver_id: UUID,
++     current_user: User = Depends(require_admin),
++     db: AsyncSession = Depends(get_db)
++ ):
++     patient = await db.get(PatientProfile, patient_id)
++     if not patient:
++         raise HTTPException(status_code=404, detail="Patient not found")
++     caregiver = await db.get(User, caregiver_id)
++     if caregiver in patient.caregivers:
++         patient.caregivers.remove(caregiver)
++         await db.commit()
+++>>>>>>> Stashed changes
+      return None
+diff --cc CareSync-backend/app/api/v1/users.py
+index a3fb2e5,f1c5dd4..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/api/v1/users.py
++++ b/CareSync-backend/app/api/v1/users.py
+@@@ -1,203 -1,203 +1,408 @@@
+++<<<<<<< Updated upstream
+ +from fastapi import APIRouter, Depends, HTTPException, status, Query
+ +from sqlalchemy.ext.asyncio import AsyncSession
+ +from sqlalchemy import select, func
+ +from uuid import UUID
+ +from typing import Optional, List
+ +from app.database import get_db
+ +from app.models.user import User
+ +from app.models.agency import Agency
+ +from app.schemas.user import UserCreate, UserUpdate, UserResponse
+ +from app.core.dependencies import require_admin, get_agency_id_from_user, get_current_user
+ +from app.core.auth import get_password_hash, generate_refresh_token, create_access_token
+ +from app.utils.token_hash import hash_refresh_token
+ +from app.models.refresh_token import RefreshToken
+ +from datetime import datetime, timedelta
+ +from app.core.email import send_welcome_email
+ +
+ +router = APIRouter(prefix="/users", tags=["Users"])
+ +
+ +@router.get("/", response_model=List[UserResponse])
+ +async def list_users(
+ +    skip: int = Query(0, ge=0),
+ +    limit: int = Query(100, ge=1, le=500),
+ +    role: Optional[str] = None,
+ +    admin_user: User = Depends(require_admin),
+ +    db: AsyncSession = Depends(get_db),
+ +    agency_id: Optional[UUID] = Depends(get_agency_id_from_user)
+ +):
+ +    query = select(User)
+ +    if admin_user.role != "super_admin":
+ +        # Regular admin sees only users in their agency
+ +        query = query.where(User.agency_id == admin_user.agency_id)
+ +    else:
+ +        if agency_id:  # super admin can filter by agency
+ +            query = query.where(User.agency_id == agency_id)
+ +
+ +    if role:
+ +        query = query.where(func.lower(User.role) == role.lower().strip())
+ +
+ +    query = query.offset(skip).limit(limit)
+ +    result = await db.execute(query)
+ +    users = result.scalars().all()
+ +    return users
+ +
+ +@router.post("/", status_code=status.HTTP_201_CREATED)
+ +async def create_user(
+ +    user_data: UserCreate,
+ +    admin_user: User = Depends(require_admin),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    # Validate role + agency assignment
+ +    if user_data.role.lower() == "super_admin":
+ +        # Only super_admin can create super_admin
+ +        if admin_user.role != "super_admin":
+ +            raise HTTPException(
+ +                status_code=403, 
+ +                detail="Only super admin can create super admin users"
+ +            )
+ +        agency_id = None  # Super admin users have no agency
+ +    else:
+ +        # Creating non-super-admin user
+ +        if admin_user.role == "super_admin":
+ +            # Super admin must explicitly provide agency_id
+ +            if not user_data.agency_id:
+ +                raise HTTPException(
+ +                    status_code=400, 
+ +                    detail="Agency ID is required when super admin creates non-super-admin users"
+ +                )
+ +            
+ +            # Validate agency exists
+ +            agency_exists = await db.execute(
+ +                select(Agency).where(Agency.id == user_data.agency_id)
+ +            )
+ +            if not agency_exists.scalar_one_or_none():
+ +                raise HTTPException(
+ +                    status_code=404, 
+ +                    detail=f"Agency with ID {user_data.agency_id} not found"
+ +                )
+ +            
+ +            agency_id = user_data.agency_id
+ +        else:
+ +            # Regular admin: must have an agency and can only create within it
+ +            if not admin_user.agency_id:
+ +                raise HTTPException(
+ +                    status_code=400, 
+ +                    detail="Admin user has no agency assigned"
+ +                )
+ +            
+ +            # Force agency to admin's agency (ignore any provided agency_id)
+ +            agency_id = admin_user.agency_id
+ +            
+ +            # Optional: warn if user tried to specify different agency
+ +            if user_data.agency_id and user_data.agency_id != admin_user.agency_id:
+ +                raise HTTPException(
+ +                    status_code=403, 
+ +                    detail="Regular admins can only create users within their own agency"
+ +                )
+ +
+ +    # Check email uniqueness
+ +    existing = await db.execute(select(User).where(User.email == user_data.email))
+ +    if existing.scalar_one_or_none():
+ +        raise HTTPException(status_code=400, detail="Email already registered")
+ +
+ +    # Create user
+ +    hashed_pw = get_password_hash(user_data.password)
+ +    new_user = User(
+ +        email=user_data.email,
+ +        hashed_password=hashed_pw,
+ +        full_name=user_data.full_name,
+ +        role=user_data.role,
+ +        agency_id=agency_id,
+ +        avatar_url=user_data.avatar_url
+ +    )
+ +    db.add(new_user)
+ +    await db.commit()
+ +    await db.refresh(new_user)
+ +
+ +    # Send welcome email (async fire-and-forget)
+ +    agency_name = None
+ +    if agency_id:
+ +        agency_result = await db.execute(select(Agency).where(Agency.id == agency_id))
+ +        agency = agency_result.scalar_one_or_none()
+ +        if agency:
+ +            agency_name = agency.name
+ +    await send_welcome_email(new_user.email, new_user.full_name, new_user.role, agency_name)
+ +
+ +    # Create tokens for the new user so frontend can log in immediately
+ +    is_super_admin = (new_user.role == "super_admin")
+ +    access_token = create_access_token(new_user.id, new_user.agency_id, new_user.role, is_super_admin)
+ +    raw_refresh = generate_refresh_token()
+ +    hashed = hash_refresh_token(raw_refresh)
+ +    expires_at = datetime.utcnow() + timedelta(days=7)
+ +    rt = RefreshToken(user_id=new_user.id, token_hash=hashed, expires_at=expires_at)
+ +    db.add(rt)
+ +    await db.commit()
+ +
+ +    return {
+ +        "id": str(new_user.id),
+ +        "email": new_user.email,
+ +        "full_name": new_user.full_name,
+ +        "role": new_user.role,
+ +        "access_token": access_token,
+ +        "refresh_token": raw_refresh
+ +    }
+ +
+ +@router.get("/{user_id}", response_model=UserResponse)
+ +async def get_user(
+ +    user_id: UUID,
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    # Permission: admin or self
+ +    if current_user.role not in ["super_admin", "admin"] and current_user.id != user_id:
+ +        raise HTTPException(status_code=403, detail="Not authorized")
+ +
+ +    result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))
+ +    user = result.scalar_one_or_none()
+ +    if not user:
+ +        raise HTTPException(status_code=404, detail="User not found")
+ +    return user
+ +
+ +@router.put("/{user_id}", response_model=UserResponse)
+ +async def update_user(
+ +    user_id: UUID,
+ +    update_data: UserUpdate,
+ +    current_user: User = Depends(get_current_user),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    # Permission: admin or self (but role update only admin)
+ +    if current_user.role not in ["super_admin", "admin"] and current_user.id != user_id:
+ +        raise HTTPException(status_code=403, detail="Not authorized")
+ +
+ +    result = await db.execute(select(User).where(User.id == user_id))
+ +    user = result.scalar_one_or_none()
+ +    if not user:
+ +        raise HTTPException(status_code=404, detail="User not found")
+ +
+ +    # If regular user updating themselves, cannot change role
+ +    if current_user.id == user_id and current_user.role not in ["super_admin", "admin"] and update_data.role is not None:
+ +        raise HTTPException(status_code=403, detail="Cannot change your own role")
+ +
+ +    # Update fields
+ +    for field, value in update_data.model_dump(exclude_unset=True).items():
+ +        setattr(user, field, value)
+ +
+ +    await db.commit()
+ +    await db.refresh(user)
+ +    return user
+ +
+ +@router.delete("/{user_id}", status_code=204)
+ +async def delete_user(
+ +    user_id: UUID,
+ +    admin_user: User = Depends(require_admin),
+ +    db: AsyncSession = Depends(get_db)
+ +):
+ +    result = await db.execute(select(User).where(User.id == user_id))
+ +    user = result.scalar_one_or_none()
+ +    if not user:
+ +        raise HTTPException(status_code=404, detail="User not found")
+ +
+ +    # Prevent deleting self if you're the last admin? optional for MVP
+ +    await db.delete(user)
+ +    await db.commit()
+++=======
++ from fastapi import APIRouter, Depends, HTTPException, status, Query
++ from sqlalchemy.ext.asyncio import AsyncSession
++ from sqlalchemy import select, func
++ from uuid import UUID
++ from typing import Optional, List
++ from app.database import get_db
++ from app.models.user import User
++ from app.models.agency import Agency
++ from app.schemas.user import UserCreate, UserUpdate, UserResponse
++ from app.core.dependencies import require_admin, get_agency_id_from_user, get_current_user
++ from app.core.auth import get_password_hash, generate_refresh_token, create_access_token
++ from app.utils.token_hash import hash_refresh_token
++ from app.models.refresh_token import RefreshToken
++ from datetime import datetime, timedelta
++ from app.core.email import send_welcome_email
++ 
++ router = APIRouter(prefix="/users", tags=["Users"])
++ 
++ @router.get("/", response_model=List[UserResponse])
++ async def list_users(
++     skip: int = Query(0, ge=0),
++     limit: int = Query(100, ge=1, le=500),
++     role: Optional[str] = None,
++     admin_user: User = Depends(require_admin),
++     db: AsyncSession = Depends(get_db),
++     agency_id: Optional[UUID] = Depends(get_agency_id_from_user)
++ ):
++     query = select(User)
++     if admin_user.role != "super_admin":
++         # Regular admin sees only users in their agency
++         query = query.where(User.agency_id == admin_user.agency_id)
++     else:
++         if agency_id:  # super admin can filter by agency
++             query = query.where(User.agency_id == agency_id)
++ 
++     if role:
++         query = query.where(User.role == role)
++ 
++     query = query.offset(skip).limit(limit)
++     result = await db.execute(query)
++     users = result.scalars().all()
++     return users
++ 
++ @router.post("/", status_code=status.HTTP_201_CREATED)
++ async def create_user(
++     user_data: UserCreate,
++     admin_user: User = Depends(require_admin),
++     db: AsyncSession = Depends(get_db)
++ ):
++     # Validate role + agency assignment
++     if user_data.role == "super_admin":
++         # Only super_admin can create super_admin
++         if admin_user.role != "super_admin":
++             raise HTTPException(
++                 status_code=403, 
++                 detail="Only super admin can create super admin users"
++             )
++         agency_id = None  # Super admin users have no agency
++     else:
++         # Creating non-super-admin user
++         if admin_user.role == "super_admin":
++             # Super admin must explicitly provide agency_id
++             if not user_data.agency_id:
++                 raise HTTPException(
++                     status_code=400, 
++                     detail="Agency ID is required when super admin creates non-super-admin users"
++                 )
++             
++             # Validate agency exists
++             agency_exists = await db.execute(
++                 select(Agency).where(Agency.id == user_data.agency_id)
++             )
++             if not agency_exists.scalar_one_or_none():
++                 raise HTTPException(
++                     status_code=404, 
++                     detail=f"Agency with ID {user_data.agency_id} not found"
++                 )
++             
++             agency_id = user_data.agency_id
++         else:
++             # Regular admin: must have an agency and can only create within it
++             if not admin_user.agency_id:
++                 raise HTTPException(
++                     status_code=400, 
++                     detail="Admin user has no agency assigned"
++                 )
++             
++             # Force agency to admin's agency (ignore any provided agency_id)
++             agency_id = admin_user.agency_id
++             
++             # Optional: warn if user tried to specify different agency
++             if user_data.agency_id and user_data.agency_id != admin_user.agency_id:
++                 raise HTTPException(
++                     status_code=403, 
++                     detail="Regular admins can only create users within their own agency"
++                 )
++ 
++     # Check email uniqueness
++     existing = await db.execute(select(User).where(User.email == user_data.email))
++     if existing.scalar_one_or_none():
++         raise HTTPException(status_code=400, detail="Email already registered")
++ 
++     # Create user
++     hashed_pw = get_password_hash(user_data.password)
++     new_user = User(
++         email=user_data.email,
++         hashed_password=hashed_pw,
++         full_name=user_data.full_name,
++         role=user_data.role,
++         agency_id=agency_id,
++         avatar_url=user_data.avatar_url
++     )
++     db.add(new_user)
++     await db.commit()
++     await db.refresh(new_user)
++ 
++     # Send welcome email (async fire-and-forget)
++     agency_name = None
++     if agency_id:
++         agency_result = await db.execute(select(Agency).where(Agency.id == agency_id))
++         agency = agency_result.scalar_one_or_none()
++         if agency:
++             agency_name = agency.name
++     await send_welcome_email(new_user.email, new_user.full_name, new_user.role, agency_name)
++ 
++     # Create tokens for the new user so frontend can log in immediately
++     is_super_admin = (new_user.role == "super_admin")
++     access_token = create_access_token(new_user.id, new_user.agency_id, new_user.role, is_super_admin)
++     raw_refresh = generate_refresh_token()
++     hashed = hash_refresh_token(raw_refresh)
++     expires_at = datetime.utcnow() + timedelta(days=7)
++     rt = RefreshToken(user_id=new_user.id, token_hash=hashed, expires_at=expires_at)
++     db.add(rt)
++     await db.commit()
++ 
++     return {
++         "id": str(new_user.id),
++         "email": new_user.email,
++         "full_name": new_user.full_name,
++         "role": new_user.role,
++         "access_token": access_token,
++         "refresh_token": raw_refresh
++     }
++ 
++ @router.get("/{user_id}", response_model=UserResponse)
++ async def get_user(
++     user_id: UUID,
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db)
++ ):
++     # Permission: admin or self
++     if current_user.role not in ["super_admin", "admin"] and current_user.id != user_id:
++         raise HTTPException(status_code=403, detail="Not authorized")
++ 
++     result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))
++     user = result.scalar_one_or_none()
++     if not user:
++         raise HTTPException(status_code=404, detail="User not found")
++     return user
++ 
++ @router.put("/{user_id}", response_model=UserResponse)
++ async def update_user(
++     user_id: UUID,
++     update_data: UserUpdate,
++     current_user: User = Depends(get_current_user),
++     db: AsyncSession = Depends(get_db)
++ ):
++     # Permission: admin or self (but role update only admin)
++     if current_user.role not in ["super_admin", "admin"] and current_user.id != user_id:
++         raise HTTPException(status_code=403, detail="Not authorized")
++ 
++     result = await db.execute(select(User).where(User.id == user_id))
++     user = result.scalar_one_or_none()
++     if not user:
++         raise HTTPException(status_code=404, detail="User not found")
++ 
++     # If regular user updating themselves, cannot change role
++     if current_user.id == user_id and current_user.role not in ["super_admin", "admin"] and update_data.role is not None:
++         raise HTTPException(status_code=403, detail="Cannot change your own role")
++ 
++     # Update fields
++     for field, value in update_data.model_dump(exclude_unset=True).items():
++         setattr(user, field, value)
++ 
++     await db.commit()
++     await db.refresh(user)
++     return user
++ 
++ @router.delete("/{user_id}", status_code=204)
++ async def delete_user(
++     user_id: UUID,
++     admin_user: User = Depends(require_admin),
++     db: AsyncSession = Depends(get_db)
++ ):
++     result = await db.execute(select(User).where(User.id == user_id))
++     user = result.scalar_one_or_none()
++     if not user:
++         raise HTTPException(status_code=404, detail="User not found")
++ 
++     # Prevent deleting self if you're the last admin? optional for MVP
++     await db.delete(user)
++     await db.commit()
+++>>>>>>> Stashed changes
+      return None
+diff --cc CareSync-backend/app/config.py
+index c43a9b0,2973da6..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/config.py
++++ b/CareSync-backend/app/config.py
+@@@ -1,49 -1,34 +1,85 @@@
+++<<<<<<< Updated upstream
+ +from pydantic_settings import BaseSettings
+ +from pydantic import ConfigDict, Field
+ +from typing import Optional
+ +
+ +class Settings(BaseSettings):
+ +    # Database 
+ +    database_url: str 
+ +
+ +    # JWT 
+ +    jwt_secret_key: str
+ +    jwt_algorithm: str = "HS256"
+ +    access_token_expire_minutes: int = 15
+ +    refresh_token_expire_days: int = 7
+ +
+ +    # Email
+ +    resend_api_key: Optional[str] = None
+ +    sendgrid_api_key: Optional[str] = None
+ +    email_provider: str = "resend"
+ +    email_from: str = "noreply@caresync.com"
+ +
+ +    # AI
+ +    openai_api_key: Optional[str] = None
+ +
+ +    # Video
+ +    daily_api_key: Optional[str] = None
+ +
+ +    # Environment
+ +    environment: str = "development"
+ +
+ +    frontend_url: str = "http://localhost:3000"
+ +
+ +    # Alerts 
+ +    # Hourly alerts with reading before a miss check in alerts fires 
+ +    missed_checkin_hours: int = 24
+ +
+ +    model_config = ConfigDict(
+ +        env_file=".env", 
+ +        env_file_encoding="utf-8",
+ +        extra="ignore"
+ +    )
+ +
+ +    # This tells Pydantic to look for a .env file
+ +    model_config = ConfigDict(
+ +        env_file=".env", 
+ +        env_file_encoding="utf-8",
+ +        extra="ignore"
+ +    )
+ +
+++=======
++ from pydantic_settings import BaseSettings
++ from pydantic import ConfigDict, Field
++ from typing import Optional
++ 
++ class Settings(BaseSettings):
++     # Database 
++     database_url: str 
++ 
++     # JWT 
++     jwt_secret_key: str
++     jwt_algorithm: str = "HS256"
++     access_token_expire_minutes: int = 15
++     refresh_token_expire_days: int = 7
++ 
++     # Email
++     resend_api_key: Optional[str] = None
++     sendgrid_api_key: Optional[str] = None
++     email_provider: str = "resend"
++     email_from: str = "noreply@caresync.com"
++ 
++     # AI
++     openai_api_key: Optional[str] = None
++ 
++     # Environment
++     environment: str = "development"
++ 
++     # This tells Pydantic to look for a .env file
++     model_config = ConfigDict(
++         env_file=".env", 
++         env_file_encoding="utf-8",
++         extra="ignore"
++     )
++ 
+++>>>>>>> Stashed changes
+  settings = Settings()
+diff --cc CareSync-backend/app/core/email.py
+index 920fa22,1d735ca..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/core/email.py
++++ b/CareSync-backend/app/core/email.py
+@@@ -1,136 -1,52 +1,191 @@@
+++<<<<<<< Updated upstream
+ +# app/core/email.py
+ +import logging
+ +from app.config import settings
+ +
+ +logger = logging.getLogger(__name__)
+ +
+ +
+ +#  Internal send helper 
+ +# All email functions delegate here so provider logic lives in one place.
+ +
+ +async def _send(to: str, subject: str, html: str) -> bool:
+ +    if settings.environment == "development" and not settings.resend_api_key and not settings.sendgrid_api_key:
+ +        logger.info(f"[EMAIL MOCK] To: {to} | Subject: {subject}")
+ +        return True
+ +    try:
+ +        if settings.email_provider == "resend" and settings.resend_api_key:
+ +            import resend
+ +            resend.api_key = settings.resend_api_key
+ +            resend.Emails.send({
+ +                "from": settings.email_from,
+ +                "to": to,
+ +                "subject": subject,
+ +                "html": html,
+ +            })
+ +            logger.info(f"Email sent via Resend to {to}")
+ +        elif settings.email_provider == "sendgrid" and settings.sendgrid_api_key:
+ +            from sendgrid import SendGridAPIClient
+ +            from sendgrid.helpers.mail import Mail
+ +            sg = SendGridAPIClient(settings.sendgrid_api_key)
+ +            sg.send(Mail(
+ +                from_email=settings.email_from,
+ +                to_emails=to,
+ +                subject=subject,
+ +                html_content=html,
+ +            ))
+ +            logger.info(f"Email sent via SendGrid to {to}")
+ +        else:
+ +            logger.warning(f"No email provider configured. Would send to {to}")
+ +        return True
+ +    except Exception as e:
+ +        logger.error(f"Failed to send email to {to}: {e}")
+ +        return False
+ +
+ +
+ +# Welcome email 
+ +
+ +async def send_welcome_email(
+ +    email: str, full_name: str, role: str, agency_name: str = None
+ +) -> bool:
+ +    subject = f"Welcome to CareSync, {full_name}!"
+ +    html = f"""
+ +    <h1>Welcome {full_name}!</h1>
+ +    <p>You've been added as a <strong>{role}</strong> to CareSync.</p>
+ +    {f'<p>Agency: {agency_name}</p>' if agency_name else ''}
+ +    <p>Please contact your agency administrator to set your password and log in.</p>
+ +    <p>Best regards,<br>CareSync Team</p>
+ +    """
+ +    return await _send(email, subject, html)
+ +
+ +
+ +# ── Alert notification email (Week 4) ─────────────────────────────────────────
+ +
+ +async def send_alert_email(
+ +    to: str,
+ +    recipient_name: str,
+ +    patient_name: str,
+ +    severity: str,
+ +    message: str,
+ +    alert_id: str,
+ +) -> bool:
+ +    colour_map = {
+ +        "critical": "#DC2626",
+ +        "warning":  "#D97706",
+ +        "info":     "#2563EB",
+ +    }
+ +    badge_colour = colour_map.get(severity.lower(), "#6B7280")
+ +    subject = f"[CareSync {severity.upper()}] Alert for {patient_name}"
+ +    html = f"""
+ +    <div style="font-family:sans-serif;max-width:560px;margin:auto;">
+ +      <h2 style="color:#0F6E56;">CareSync Alert</h2>
+ +      <p>
+ +        <span style="background:{badge_colour};color:#fff;padding:3px 10px;
+ +                     border-radius:4px;font-weight:bold;font-size:13px;">
+ +          {severity.upper()}
+ +        </span>
+ +      </p>
+ +      <p>Hi {recipient_name},</p>
+ +      <p>A <strong>{severity}</strong> alert has been raised for your patient
+ +         <strong>{patient_name}</strong>:</p>
+ +      <blockquote style="border-left:4px solid {badge_colour};
+ +                          padding:8px 16px;color:#333;margin:16px 0;">
+ +        {message}
+ +      </blockquote>
+ +      <p>Please log in to CareSync to review the reading and acknowledge this alert.</p>
+ +      <p style="margin-top:24px;">
+ +        <a href="{settings.frontend_url}/alerts/{alert_id}"
+ +           style="background:#0F6E56;color:#fff;padding:10px 20px;
+ +                  border-radius:6px;text-decoration:none;font-weight:bold;">
+ +          View Alert
+ +        </a>
+ +      </p>
+ +      <hr style="margin-top:32px;border:none;border-top:1px solid #eee;">
+ +      <p style="color:#999;font-size:12px;">CareSync — Continuous healthcare beyond hospital walls</p>
+ +    </div>
+ +    """
+ +    return await _send(to, subject, html)
+ +
+ +
+ +# Missed check-in email 
+ +
+ +async def send_missed_checkin_email(
+ +    to: str,
+ +    recipient_name: str,
+ +    patient_name: str,
+ +    hours_overdue: int,
+ +) -> bool:
+ +    subject = f"[CareSync WARNING] {patient_name} missed their health check-in"
+ +    html = f"""
+ +    <div style="font-family:sans-serif;max-width:560px;margin:auto;">
+ +      <h2 style="color:#0F6E56;">CareSync — Missed Check-in</h2>
+ +      <p>Hi {recipient_name},</p>
+ +      <p>Your patient <strong>{patient_name}</strong> has not logged any health
+ +         readings in the past <strong>{hours_overdue} hours</strong>.</p>
+ +      <p>Please follow up to ensure they are doing well.</p>
+ +      <p style="margin-top:24px;">
+ +        <a href="{settings.frontend_url}/patients"
+ +           style="background:#0F6E56;color:#fff;padding:10px 20px;
+ +                  border-radius:6px;text-decoration:none;font-weight:bold;">
+ +          View Patients
+ +        </a>
+ +      </p>
+ +      <hr style="margin-top:32px;border:none;border-top:1px solid #eee;">
+ +      <p style="color:#999;font-size:12px;">CareSync — Continuous healthcare beyond hospital walls</p>
+ +    </div>
+ +    """
+-     return await _send(to, subject, html)
+++    return await _send(to, subject, html)
+++=======
++ import logging
++ from app.config import settings
++ 
++ logger = logging.getLogger(__name__)
++ 
++ async def send_welcome_email(email: str, full_name: str, role: str, agency_name: str = None):
++     subject = f"Welcome to CareSync, {full_name}!"
++     
++     # For development, if no API key, just log
++     if settings.environment == "development" and not settings.resend_api_key and not settings.sendgrid_api_key:
++         logger.info(f"[EMAIL MOCK] Would send welcome email to {email}")
++         logger.info(f"Subject: {subject}")
++         return True
++     
++     html_content = f"""
++     <h1>Welcome {full_name}!</h1>
++     <p>You've been added as a <strong>{role}</strong> to CareSync.</p>
++     {f'<p>Agency: {agency_name}</p>' if agency_name else ''}
++     <p>Please contact your agency administrator to set your password and log in.</p>
++     <p>Best regards,<br>CareSync Team</p>
++     """
++     
++     try:
++         if settings.email_provider == "resend" and settings.resend_api_key:
++             import resend
++             resend.api_key = settings.resend_api_key
++             # Correct API call for Resend Python SDK
++             resend.Emails.send({
++                 "from": settings.email_from,
++                 "to": email,
++                 "subject": subject,
++                 "html": html_content
++             })
++             logger.info(f"Welcome email sent via Resend to {email}")
++         elif settings.email_provider == "sendgrid" and settings.sendgrid_api_key:
++             from sendgrid import SendGridAPIClient
++             from sendgrid.helpers.mail import Mail
++             message = Mail(
++                 from_email=settings.email_from,
++                 to_emails=email,
++                 subject=subject,
++                 html_content=html_content
++             )
++             sg = SendGridAPIClient(settings.sendgrid_api_key)
++             sg.send(message)
++             logger.info(f"Welcome email sent via SendGrid to {email}")
++         else:
++             logger.warning(f"No email provider configured. Would send to {email}")
++         return True
++     except Exception as e:
++         logger.error(f"Failed to send welcome email to {email}: {e}")
+ -        return False
+++        return False
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/database.py
+index 93ec378,eeb9c00..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/database.py
++++ b/CareSync-backend/app/database.py
+@@@ -1,20 -1,12 +1,34 @@@
+++<<<<<<< Updated upstream
+ +from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+ +from sqlalchemy.orm import DeclarativeBase
+ +from app.config import settings
+ +
+ +engine = create_async_engine(settings.database_url, echo=False)
+ +
+ +# Used by FastAPI dependency injection (get_db)
+ +AsyncSessionFactory = async_sessionmaker(engine, expire_on_commit=False)
+ +
+ +# Used by the scheduler (outside request context)
+ +AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+ +
+ +
+ +class Base(DeclarativeBase):
+ +    pass
+ +
+ +
+ +async def get_db():
+ +    async with AsyncSessionFactory() as session:
+++=======
++ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
++ from sqlalchemy.orm import declarative_base
++ 
++ from app.config import settings
++ 
++ engine = create_async_engine(settings.database_url, echo=True)
++ AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
++ Base = declarative_base()
++ 
++ async def get_db():
++     async with AsyncSessionLocal() as session:
+++>>>>>>> Stashed changes
+          yield session
+diff --cc CareSync-backend/app/main.py
+index ce83d4d,8257fcc..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/main.py
++++ b/CareSync-backend/app/main.py
+@@@ -1,116 -1,112 +1,231 @@@
+++<<<<<<< Updated upstream
+ +from contextlib import asynccontextmanager
+ +
+ +from fastapi import FastAPI
+ +from fastapi.middleware.cors import CORSMiddleware
+ +from sqlalchemy import text
+ +
+ +from app.database import engine, Base
+ +from app.api.v1 import (
+ +    auth, users, patients, alerts, sos,
+ +    consultations, caregiver, medications, ai,
+ +    hospitals, health_readings, dashboard,
+ +)
+ +from app.seed import seed_database
+ +
+ +
+ +async def ensure_week3_schema(conn):
+ +    statements = [
+ +        "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS agency_id UUID",
+ +        "ALTER TABLE users ADD COLUMN IF NOT EXISTS hospital_id UUID",
+ +        "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS systolic_bp INTEGER",
+ +        "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS diastolic_bp INTEGER",
+ +        "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS glucose DOUBLE PRECISION",
+ +        "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS weight DOUBLE PRECISION",
+ +        "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS temperature DOUBLE PRECISION",
+ +        "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS oxygen_saturation INTEGER",
+ +        "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS heart_rate INTEGER",
+ +        "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS symptoms TEXT",
+ +        "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS photo_url VARCHAR(500)",
+ +        "CREATE INDEX IF NOT EXISTS ix_health_readings_recorded_at ON health_readings (recorded_at)",
+ +        "CREATE INDEX IF NOT EXISTS ix_health_readings_patient_id ON health_readings (patient_id)",
+ +    ]
+ +    for statement in statements:
+ +        await conn.execute(text(statement))
+ +
+ +    await conn.execute(
+ +        text(
+ +            """
+ +            DO $$
+ +            BEGIN
+ +                IF NOT EXISTS (
+ +                    SELECT 1 FROM pg_constraint WHERE conname = 'fk_hospitals_agency_id'
+ +                ) THEN
+ +                    ALTER TABLE hospitals
+ +                    ADD CONSTRAINT fk_hospitals_agency_id
+ +                    FOREIGN KEY (agency_id) REFERENCES agencies(id) ON DELETE CASCADE;
+ +                END IF;
+ +
+ +                IF NOT EXISTS (
+ +                    SELECT 1 FROM pg_constraint WHERE conname = 'fk_users_hospital_id'
+ +                ) THEN
+ +                    ALTER TABLE users
+ +                    ADD CONSTRAINT fk_users_hospital_id
+ +                    FOREIGN KEY (hospital_id) REFERENCES hospitals(id) ON DELETE SET NULL;
+ +                END IF;
+ +
+ +                IF EXISTS (
+ +                    SELECT 1 FROM information_schema.columns
+ +                    WHERE table_name = 'health_readings' AND column_name = 'reading_type'
+ +                ) THEN
+ +                    ALTER TABLE health_readings ALTER COLUMN reading_type DROP NOT NULL;
+ +                END IF;
+ +
+ +                IF EXISTS (
+ +                    SELECT 1 FROM information_schema.columns
+ +                    WHERE table_name = 'health_readings' AND column_name = 'value'
+ +                ) THEN
+ +                    ALTER TABLE health_readings ALTER COLUMN value DROP NOT NULL;
+ +                END IF;
+ +            END $$;
+ +            """
+ +        )
+ +    )
+ +
+ +
+ +@asynccontextmanager
+ +async def lifespan(app: FastAPI):
+ +    # Startup
+ +    async with engine.begin() as conn:
+ +        await conn.run_sync(Base.metadata.create_all)
+ +        await ensure_week3_schema(conn)
+ +    await seed_database()
+ +
+ +    yield
+ +
+ +    # Shutdown (add cleanup here if needed)
+ +
+ +
+ +app = FastAPI(title="CareSync API", version="1.0.0", lifespan=lifespan)
+ +
+ +app.add_middleware(
+ +    CORSMiddleware,
+ +    allow_origins=["*"],
+ +    allow_credentials=True,
+ +    allow_methods=["*"],
+ +    allow_headers=["*"],
+ +)
+ +
+ +PREFIX = "/api/v1"
+ +
+ +app.include_router(auth.router, prefix=PREFIX)
+ +app.include_router(users.router, prefix=PREFIX)
+ +app.include_router(patients.router, prefix=PREFIX)
+ +app.include_router(health_readings.router, prefix=PREFIX)
+ +app.include_router(alerts.router, prefix=PREFIX)
+ +app.include_router(dashboard.router, prefix=PREFIX)
+ +app.include_router(sos.router, prefix=PREFIX)
+ +app.include_router(consultations.router, prefix=PREFIX)
+ +app.include_router(caregiver.router, prefix=PREFIX)
+ +app.include_router(medications.router, prefix=PREFIX)
+ +app.include_router(ai.router, prefix=PREFIX)
+ +app.include_router(hospitals.router, prefix=PREFIX)
+ +
+ +
+ +@app.get("/health")
+ +async def health():
+-     return {"status": "ok"}
+++    return {"status": "ok"}
+++=======
++ from fastapi import FastAPI
++ from fastapi.middleware.cors import CORSMiddleware
++ from sqlalchemy import text
++ from app.database import engine, Base
++ from app.api.v1 import (
++     ai,
++     alerts,
++     auth,
++     caregiver,
++     consultations,
++     health_readings,
++     hospitals,
++     medications,
++     patients,
++     sos,
++     users,
++ )
++ from app.seed import seed_database
++ import sys
++ 
++ app = FastAPI(title="CareSync API", version="1.0.0")
++ 
++ app.add_middleware(
++     CORSMiddleware,
++     allow_origins=["*"],
++     allow_credentials=True,
++     allow_methods=["*"],
++     allow_headers=["*"],
++ )
++ 
++ 
++ async def ensure_week3_schema(conn):
++     statements = [
++         "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS agency_id UUID",
++         "ALTER TABLE users ADD COLUMN IF NOT EXISTS hospital_id UUID",
++         "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS systolic_bp INTEGER",
++         "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS diastolic_bp INTEGER",
++         "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS glucose DOUBLE PRECISION",
++         "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS weight DOUBLE PRECISION",
++         "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS temperature DOUBLE PRECISION",
++         "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS oxygen_saturation INTEGER",
++         "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS heart_rate INTEGER",
++         "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS symptoms TEXT",
++         "ALTER TABLE health_readings ADD COLUMN IF NOT EXISTS photo_url VARCHAR(500)",
++         "CREATE INDEX IF NOT EXISTS ix_health_readings_recorded_at ON health_readings (recorded_at)",
++         "CREATE INDEX IF NOT EXISTS ix_health_readings_patient_id ON health_readings (patient_id)",
++     ]
++     for statement in statements:
++         await conn.execute(text(statement))
++ 
++     await conn.execute(
++         text(
++             """
++             DO $$
++             BEGIN
++                 IF NOT EXISTS (
++                     SELECT 1 FROM pg_constraint WHERE conname = 'fk_hospitals_agency_id'
++                 ) THEN
++                     ALTER TABLE hospitals
++                     ADD CONSTRAINT fk_hospitals_agency_id
++                     FOREIGN KEY (agency_id) REFERENCES agencies(id) ON DELETE CASCADE;
++                 END IF;
++ 
++                 IF NOT EXISTS (
++                     SELECT 1 FROM pg_constraint WHERE conname = 'fk_users_hospital_id'
++                 ) THEN
++                     ALTER TABLE users
++                     ADD CONSTRAINT fk_users_hospital_id
++                     FOREIGN KEY (hospital_id) REFERENCES hospitals(id) ON DELETE SET NULL;
++                 END IF;
++ 
++                 IF EXISTS (
++                     SELECT 1 FROM information_schema.columns
++                     WHERE table_name = 'health_readings' AND column_name = 'reading_type'
++                 ) THEN
++                     ALTER TABLE health_readings ALTER COLUMN reading_type DROP NOT NULL;
++                 END IF;
++ 
++                 IF EXISTS (
++                     SELECT 1 FROM information_schema.columns
++                     WHERE table_name = 'health_readings' AND column_name = 'value'
++                 ) THEN
++                     ALTER TABLE health_readings ALTER COLUMN value DROP NOT NULL;
++                 END IF;
++             END $$;
++             """
++         )
++     )
++ 
++ 
++ @app.on_event("startup")
++ async def startup():
++     async with engine.begin() as conn:
++         await conn.run_sync(Base.metadata.create_all)
++         await ensure_week3_schema(conn)
++     await seed_database()
++ 
++ app.include_router(auth.router, prefix="/api/v1")
++ app.include_router(users.router, prefix="/api/v1")
++ app.include_router(patients.router, prefix="/api/v1")
++ app.include_router(health_readings.router, prefix="/api/v1")
++ app.include_router(alerts.router, prefix="/api/v1")
++ app.include_router(sos.router, prefix="/api/v1")
++ app.include_router(consultations.router, prefix="/api/v1")
++ app.include_router(caregiver.router, prefix="/api/v1")
++ app.include_router(medications.router, prefix="/api/v1")
++ app.include_router(ai.router, prefix="/api/v1")
++ app.include_router(hospitals.router, prefix="/api/v1")
++ 
++ @app.get("/health")
++ async def health():
++     return {"status": "ok"}
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/models/alert.py
+index ffa0978,d1f48aa..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/models/alert.py
++++ b/CareSync-backend/app/models/alert.py
+@@@ -1,28 -1,26 +1,57 @@@
+++<<<<<<< Updated upstream
+ +import uuid
+ +
+ +from sqlalchemy import String, ForeignKey, DateTime, Boolean, Enum
+ +from sqlalchemy.orm import Mapped, mapped_column, relationship
+ +from app.database import Base
+ +from uuid import uuid4, UUID
+ +from datetime import datetime
+ +import enum
+ +
+ +class AlertSeverity(str, enum.Enum):
+ +    INFO = "info"
+ +    WARNING = "warning"
+ +    CRITICAL = "critical"
+ +
+ +class Alert(Base):
+ +    __tablename__ = "alerts"
+ +
+ +    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+ +    patient_id: Mapped[UUID] = mapped_column(ForeignKey("patient_profiles.id", ondelete="CASCADE"), nullable=False)
+ +    severity: Mapped[AlertSeverity] = mapped_column(Enum(AlertSeverity), nullable=False)
+ +    message: Mapped[str] = mapped_column(String(500), nullable=False)
+ +    reading_id: Mapped[UUID] = mapped_column(ForeignKey("health_readings.id"), nullable=True)
+ +    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+ +    acknowledged_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=True)
+ +    acknowledged_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+ +    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+ +
+ +    reading = relationship("HealthReading", back_populates="alerts")
+++=======
++ from sqlalchemy import String, ForeignKey, DateTime, Boolean, Enum
++ from sqlalchemy.orm import Mapped, mapped_column, relationship
++ from app.database import Base
++ from uuid import uuid4, UUID
++ from datetime import datetime
++ import enum
++ 
++ class AlertSeverity(str, enum.Enum):
++     INFO = "info"
++     WARNING = "warning"
++     CRITICAL = "critical"
++ 
++ class Alert(Base):
++     __tablename__ = "alerts"
++ 
++     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
++     patient_id: Mapped[UUID] = mapped_column(ForeignKey("patient_profiles.id", ondelete="CASCADE"), nullable=False)
++     severity: Mapped[AlertSeverity] = mapped_column(Enum(AlertSeverity), nullable=False)
++     message: Mapped[str] = mapped_column(String(500), nullable=False)
++     reading_id: Mapped[UUID] = mapped_column(ForeignKey("health_readings.id"), nullable=True)
++     acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
++     acknowledged_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=True)
++     acknowledged_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
++     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
++ 
++     reading = relationship("HealthReading", back_populates="alerts")
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/models/health_reading.py
+index ed489ec,1a54d5a..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/models/health_reading.py
++++ b/CareSync-backend/app/models/health_reading.py
+@@@ -1,34 -1,34 +1,71 @@@
+++<<<<<<< Updated upstream
+ +from sqlalchemy import String, Float, ForeignKey, DateTime, Integer, Text
+ +from sqlalchemy.orm import Mapped, mapped_column, relationship
+ +from app.database import Base
+ +from uuid import uuid4, UUID
+ +from datetime import datetime
+ +from typing import Optional
+ +
+ +class HealthReading(Base):
+ +    __tablename__ = "health_readings"
+ +
+ +    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+ +    patient_id: Mapped[UUID] = mapped_column(
+ +        ForeignKey("patient_profiles.id", ondelete="CASCADE"),
+ +        nullable=False,
+ +        index=True,
+ +    )
+ +    recorded_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+ +    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+ +
+ +    systolic_bp: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+ +    diastolic_bp: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+ +    glucose: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+ +    weight: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+ +    temperature: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+ +    oxygen_saturation: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+ +    heart_rate: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+ +
+ +    symptoms: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+ +    notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+ +    photo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+ +
+ +    patient = relationship("PatientProfile", back_populates="health_readings")
+ +    recorded_by_user = relationship("User")
+ +    alerts = relationship("Alert", back_populates="reading")
+++=======
++ from sqlalchemy import String, Float, ForeignKey, DateTime, Integer, Text
++ from sqlalchemy.orm import Mapped, mapped_column, relationship
++ from app.database import Base
++ from uuid import uuid4, UUID
++ from datetime import datetime
++ from typing import Optional
++ 
++ class HealthReading(Base):
++     __tablename__ = "health_readings"
++ 
++     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
++     patient_id: Mapped[UUID] = mapped_column(
++         ForeignKey("patient_profiles.id", ondelete="CASCADE"),
++         nullable=False,
++         index=True,
++     )
++     recorded_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
++     recorded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
++ 
++     systolic_bp: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
++     diastolic_bp: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
++     glucose: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
++     weight: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
++     temperature: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
++     oxygen_saturation: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
++     heart_rate: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
++ 
++     symptoms: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
++     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
++     photo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
++ 
++     patient = relationship("PatientProfile", back_populates="health_readings")
++     recorded_by_user = relationship("User")
++     alerts = relationship("Alert", back_populates="reading")
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/schemas/ai.py
+index 4afe1ca,66ffc57..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/schemas/ai.py
++++ b/CareSync-backend/app/schemas/ai.py
+@@@ -1,24 -1,23 +1,50 @@@
+++<<<<<<< Updated upstream
+ +from typing import List
+ +from uuid import UUID
+ +from pydantic import BaseModel, Field
+ +
+ +
+ +class AIAnalyzePayload(BaseModel):
+ +    patient_id: UUID = Field(..., alias="patientId")
+ +    vitals_history: List[dict] = Field(..., alias="vitalsHistory")
+ +
+ +    class Config:
+ +        allow_population_by_field_name = True
+ +
+ +
+ +class AIInsightResponse(BaseModel):
+ +    id: str
+ +    patient_id: UUID = Field(..., alias="patientId")
+ +    patient_name: str = Field(..., alias="patientName")
+ +    summary: str
+ +    risk_level: str = Field(..., alias="riskLevel")
+ +    flags: List[str]
+ +    generated_at: str = Field(..., alias="generatedAt")
+ +
+ +    class Config:
+ +        allow_population_by_field_name = True
+++=======
++ from typing import List
++ from pydantic import BaseModel, Field, UUID4
++ 
++ 
++ class AIAnalyzePayload(BaseModel):
++     patient_id: UUID4 = Field(..., alias="patientId")
++     vitals_history: List[dict] = Field(..., alias="vitalsHistory")
++ 
++     class Config:
++         allow_population_by_field_name = True
++ 
++ 
++ class AIInsightResponse(BaseModel):
++     id: str
++     patient_id: UUID4 = Field(..., alias="patientId")
++     patient_name: str = Field(..., alias="patientName")
++     summary: str
++     risk_level: str = Field(..., alias="riskLevel")
++     flags: List[str]
++     generated_at: str = Field(..., alias="generatedAt")
++ 
++     class Config:
++         allow_population_by_field_name = True
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/schemas/alert.py
+index 1799436,00d51cf..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/schemas/alert.py
++++ b/CareSync-backend/app/schemas/alert.py
+@@@ -1,52 -1,41 +1,96 @@@
+++<<<<<<< Updated upstream
+ +from datetime import datetime
+ +from typing import Optional
+ +from uuid import UUID
+ +
+ +from pydantic import BaseModel, Field
+ +
+ +from app.models.alert import AlertSeverity
+ +
+ +
+ +class AlertBase(BaseModel):
+ +    severity: AlertSeverity
+ +    message: str = Field(..., max_length=500)
+ +
+ +
+ +class AlertCreate(AlertBase):
+ +    patient_id: UUID
+ +    reading_id: Optional[UUID] = None
+ +
+ +
+ +class AlertUpdate(BaseModel):
+ +    severity: Optional[AlertSeverity] = None
+ +    message: Optional[str] = Field(None, max_length=500)
+ +    acknowledged: Optional[bool] = None
+ +    acknowledged_by: Optional[UUID] = None
+ +    acknowledged_at: Optional[datetime] = None
+ +
+ +
+ +class AcknowledgeAlert(BaseModel):
+ +    acknowledged: bool = True
+ +
+ +
+ +class AlertResponse(AlertBase):
+ +    id: UUID
+ +    patient_id: UUID
+ +    reading_id: Optional[UUID] = None
+ +    acknowledged: bool
+ +    acknowledged_by: Optional[UUID] = None
+ +    acknowledged_at: Optional[datetime] = None
+ +    created_at: datetime
+ +
+ +    class Config:
+ +        from_attributes = True
+ +
+ +class AlertStatsResponse(BaseModel):
+ +    total_unacknowledged: int
+ +    critical: int
+ +    warning: int
+ +    info: int
+ +    alerts_last_24h: int
+ +
+ +class AcknowledgeRequest(BaseModel):
+-     note: Optional[str] = Field(None, max_length=200)
+++    note: Optional[str] = Field(None, max_length=200)
+++=======
++ from datetime import datetime
++ from typing import Optional
++ 
++ from pydantic import BaseModel, Field, UUID4
++ 
++ from app.models.alert import AlertSeverity
++ 
++ 
++ class AlertBase(BaseModel):
++     severity: AlertSeverity
++     message: str = Field(..., max_length=500)
++ 
++ 
++ class AlertCreate(AlertBase):
++     patient_id: UUID4
++     reading_id: Optional[UUID4] = None
++ 
++ 
++ class AlertUpdate(BaseModel):
++     severity: Optional[AlertSeverity] = None
++     message: Optional[str] = Field(None, max_length=500)
++     acknowledged: Optional[bool] = None
++     acknowledged_by: Optional[UUID4] = None
++     acknowledged_at: Optional[datetime] = None
++ 
++ 
++ class AcknowledgeAlert(BaseModel):
++     acknowledged: bool = True
++ 
++ 
++ class AlertResponse(AlertBase):
++     id: UUID4
++     patient_id: UUID4
++     reading_id: Optional[UUID4] = None
++     acknowledged: bool
++     acknowledged_by: Optional[UUID4] = None
++     acknowledged_at: Optional[datetime] = None
++     created_at: datetime
++ 
++     class Config:
++         from_attributes = True
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/schemas/caregiver.py
+index e2f8427,65b3e58..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/schemas/caregiver.py
++++ b/CareSync-backend/app/schemas/caregiver.py
+@@@ -1,17 -1,16 +1,36 @@@
+++<<<<<<< Updated upstream
+ +from typing import Optional
+ +
+ +from uuid import UUID
+ +from pydantic import BaseModel
+ +
+ +
+ +class VitalsLog(BaseModel):
+ +    patient_id: UUID
+ +    bp: Optional[str] = None
+ +    glucose: Optional[float] = None
+ +    temperature: Optional[float] = None
+ +    note: Optional[str] = None
+ +
+ +
+ +class NoteLog(BaseModel):
+ +    patient_id: UUID
+ +    note: str
+++=======
++ from typing import Optional
++ 
++ from pydantic import BaseModel, UUID4
++ 
++ 
++ class VitalsLog(BaseModel):
++     patient_id: UUID4
++     bp: Optional[str] = None
++     glucose: Optional[float] = None
++     temperature: Optional[float] = None
++     note: Optional[str] = None
++ 
++ 
++ class NoteLog(BaseModel):
++     patient_id: UUID4
++     note: str
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/schemas/caregiver_log.py
+index 491459e,02eb619..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/schemas/caregiver_log.py
++++ b/CareSync-backend/app/schemas/caregiver_log.py
+@@@ -1,34 -1,33 +1,70 @@@
+++<<<<<<< Updated upstream
+ +from datetime import datetime
+ +from typing import Optional
+ +
+ +from uuid import UUID
+ +from pydantic import BaseModel, Field
+ +
+ +from app.models.caregiver_log import LogType
+ +
+ +
+ +class CaregiverLogBase(BaseModel):
+ +    log_type: LogType
+ +    summary: str = Field(..., max_length=255)
+ +    detail: Optional[str] = None
+ +
+ +
+ +class CaregiverLogCreate(CaregiverLogBase):
+ +    patient_id: UUID
+ +    caregiver_id: UUID
+ +
+ +
+ +class CaregiverLogUpdate(BaseModel):
+ +    log_type: Optional[LogType] = None
+ +    summary: Optional[str] = Field(None, max_length=255)
+ +    detail: Optional[str] = None
+ +
+ +
+ +class CaregiverLogResponse(CaregiverLogBase):
+ +    id: UUID
+ +    patient_id: UUID
+ +    caregiver_id: UUID
+ +    created_at: datetime
+ +
+ +    class Config:
+ +        from_attributes = True
+++=======
++ from datetime import datetime
++ from typing import Optional
++ 
++ from pydantic import BaseModel, Field, UUID4
++ 
++ from app.models.caregiver_log import LogType
++ 
++ 
++ class CaregiverLogBase(BaseModel):
++     log_type: LogType
++     summary: str = Field(..., max_length=255)
++     detail: Optional[str] = None
++ 
++ 
++ class CaregiverLogCreate(CaregiverLogBase):
++     patient_id: UUID4
++     caregiver_id: UUID4
++ 
++ 
++ class CaregiverLogUpdate(BaseModel):
++     log_type: Optional[LogType] = None
++     summary: Optional[str] = Field(None, max_length=255)
++     detail: Optional[str] = None
++ 
++ 
++ class CaregiverLogResponse(CaregiverLogBase):
++     id: UUID4
++     patient_id: UUID4
++     caregiver_id: UUID4
++     created_at: datetime
++ 
++     class Config:
++         from_attributes = True
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/schemas/consultation.py
+index 1c3a39c,3abc1de..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/schemas/consultation.py
++++ b/CareSync-backend/app/schemas/consultation.py
+@@@ -1,48 -1,47 +1,98 @@@
+++<<<<<<< Updated upstream
+ +from datetime import datetime
+ +from typing import Optional
+ +from uuid import UUID
+ +
+ +from pydantic import BaseModel, Field
+ +
+ +from app.models.consultation import ConsultationStatus
+ +
+ +
+ +class ConsultationBase(BaseModel):
+ +    scheduled_at: datetime
+ +    duration_minutes: int = Field(30, ge=1)
+ +
+ +
+ +class ConsultationCreate(ConsultationBase):
+ +    patient_id: UUID
+ +    doctor_id: UUID
+ +
+ +
+ +class ConsultationUpdate(BaseModel):
+ +    scheduled_at: Optional[datetime] = None
+ +    duration_minutes: Optional[int] = Field(None, ge=1)
+ +    status: Optional[ConsultationStatus] = None
+ +    daily_room_name: Optional[str] = Field(None, max_length=255)
+ +    daily_room_url: Optional[str] = Field(None, max_length=500)
+ +    ai_summary: Optional[str] = Field(None, max_length=2000)
+ +    started_at: Optional[datetime] = None
+ +    ended_at: Optional[datetime] = None
+ +
+ +
+ +class ConsultationResponse(ConsultationBase):
+ +    id: UUID
+ +    patient_id: UUID
+ +    doctor_id: UUID
+ +    status: ConsultationStatus
+ +    daily_room_name: Optional[str] = None
+ +    daily_room_url: Optional[str] = None
+ +    ai_summary: Optional[str] = None
+ +    created_at: datetime
+ +    started_at: Optional[datetime] = None
+ +    ended_at: Optional[datetime] = None
+ +
+ +    class Config:
+ +        from_attributes = True
+ +
+ +
+ +class RoomResponse(BaseModel):
+ +    room_url: str
+++=======
++ from datetime import datetime
++ from typing import Optional
++ 
++ from pydantic import BaseModel, Field, UUID4
++ 
++ from app.models.consultation import ConsultationStatus
++ 
++ 
++ class ConsultationBase(BaseModel):
++     scheduled_at: datetime
++     duration_minutes: int = Field(30, ge=1)
++ 
++ 
++ class ConsultationCreate(ConsultationBase):
++     patient_id: UUID4
++     doctor_id: UUID4
++ 
++ 
++ class ConsultationUpdate(BaseModel):
++     scheduled_at: Optional[datetime] = None
++     duration_minutes: Optional[int] = Field(None, ge=1)
++     status: Optional[ConsultationStatus] = None
++     daily_room_name: Optional[str] = Field(None, max_length=255)
++     daily_room_url: Optional[str] = Field(None, max_length=500)
++     ai_summary: Optional[str] = Field(None, max_length=2000)
++     started_at: Optional[datetime] = None
++     ended_at: Optional[datetime] = None
++ 
++ 
++ class ConsultationResponse(ConsultationBase):
++     id: UUID4
++     patient_id: UUID4
++     doctor_id: UUID4
++     status: ConsultationStatus
++     daily_room_name: Optional[str] = None
++     daily_room_url: Optional[str] = None
++     ai_summary: Optional[str] = None
++     created_at: datetime
++     started_at: Optional[datetime] = None
++     ended_at: Optional[datetime] = None
++ 
++     class Config:
++         from_attributes = True
++ 
++ 
++ class RoomResponse(BaseModel):
++     room_url: str
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/schemas/health_reading.py
+index 9058f17,e23c89c..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/schemas/health_reading.py
++++ b/CareSync-backend/app/schemas/health_reading.py
+@@@ -1,166 -1,154 +1,323 @@@
+++<<<<<<< Updated upstream
+ +from datetime import datetime
+ +from typing import Optional
+ +from uuid import UUID
+ +
+ +from pydantic import BaseModel, field_validator, model_validator
+ +
+ +
+ +BP_SYSTOLIC_RANGE = (60, 250)
+ +BP_DIASTOLIC_RANGE = (40, 150)
+ +GLUCOSE_RANGE_MGDL = (20, 600)      # mg/dL range
+ +GLUCOSE_RANGE_MMOLL = (1.1, 33.3)   # mmol/L range
+ +WEIGHT_RANGE = (1, 500)
+ +TEMP_RANGE = (30, 45)
+ +O2_RANGE = (50, 100)
+ +HR_RANGE = (20, 300)
+ +
+ +
+ +class HealthReadingCreate(BaseModel):
+ +    patient_id: UUID
+ +
+ +    systolic_bp: Optional[int] = None
+ +    diastolic_bp: Optional[int] = None
+ +    glucose: Optional[float] = None
+ +    weight: Optional[float] = None
+ +    temperature: Optional[float] = None
+ +    oxygen_saturation: Optional[int] = None
+ +    heart_rate: Optional[int] = None
+ +
+ +    symptoms: Optional[str] = None
+ +    notes: Optional[str] = None
+ +    photo_url: Optional[str] = None
+ +    recorded_at: Optional[datetime] = None
+ +
+ +    @model_validator(mode="after")
+ +    def at_least_one_vital(self) -> "HealthReadingCreate":
+ +        values = [
+ +            self.systolic_bp,
+ +            self.diastolic_bp,
+ +            self.glucose,
+ +            self.weight,
+ +            self.temperature,
+ +            self.oxygen_saturation,
+ +            self.heart_rate,
+ +            self.symptoms,
+ +        ]
+ +        if all(value is None for value in values):
+ +            raise ValueError("At least one vital or symptom must be provided")
+ +        return self
+ +
+ +    @field_validator("systolic_bp")
+ +    @classmethod
+ +    def validate_systolic(cls, value):
+ +        if value is not None and not BP_SYSTOLIC_RANGE[0] <= value <= BP_SYSTOLIC_RANGE[1]:
+ +            raise ValueError(f"Systolic BP must be {BP_SYSTOLIC_RANGE[0]}-{BP_SYSTOLIC_RANGE[1]} mmHg")
+ +        return value
+ +
+ +    @field_validator("diastolic_bp")
+ +    @classmethod
+ +    def validate_diastolic(cls, value):
+ +        if value is not None and not BP_DIASTOLIC_RANGE[0] <= value <= BP_DIASTOLIC_RANGE[1]:
+ +            raise ValueError(f"Diastolic BP must be {BP_DIASTOLIC_RANGE[0]}-{BP_DIASTOLIC_RANGE[1]} mmHg")
+ +        return value
+ +
+ +    @field_validator("glucose")
+ +    @classmethod
+ +    def validate_glucose(cls, value):
+ +        if value is None:
+ +            return value
+ +        in_mgdl = GLUCOSE_RANGE_MGDL[0] <= value <= GLUCOSE_RANGE_MGDL[1]
+ +        in_mmoll = GLUCOSE_RANGE_MMOLL[0] <= value <= GLUCOSE_RANGE_MMOLL[1]
+ +        if not (in_mgdl or in_mmoll):
+ +            raise ValueError(
+ +                f"Glucose must be {GLUCOSE_RANGE_MGDL[0]}-{GLUCOSE_RANGE_MGDL[1]} mg/dL "
+ +                f"or {GLUCOSE_RANGE_MMOLL[0]}-{GLUCOSE_RANGE_MMOLL[1]} mmol/L"
+ +            )
+ +        return value
+ +
+ +    @field_validator("weight")
+ +    @classmethod
+ +    def validate_weight(cls, value):
+ +        if value is not None and not WEIGHT_RANGE[0] <= value <= WEIGHT_RANGE[1]:
+ +            raise ValueError(f"Weight must be {WEIGHT_RANGE[0]}-{WEIGHT_RANGE[1]} kg")
+ +        return value
+ +
+ +    @field_validator("temperature")
+ +    @classmethod
+ +    def validate_temperature(cls, value):
+ +        if value is not None and not TEMP_RANGE[0] <= value <= TEMP_RANGE[1]:
+ +            raise ValueError(f"Temperature must be {TEMP_RANGE[0]}-{TEMP_RANGE[1]} C")
+ +        return value
+ +
+ +    @field_validator("oxygen_saturation")
+ +    @classmethod
+ +    def validate_o2(cls, value):
+ +        if value is not None and not O2_RANGE[0] <= value <= O2_RANGE[1]:
+ +            raise ValueError(f"O2 saturation must be {O2_RANGE[0]}-{O2_RANGE[1]}%")
+ +        return value
+ +
+ +    @field_validator("heart_rate")
+ +    @classmethod
+ +    def validate_heart_rate(cls, value):
+ +        if value is not None and not HR_RANGE[0] <= value <= HR_RANGE[1]:
+ +            raise ValueError(f"Heart rate must be {HR_RANGE[0]}-{HR_RANGE[1]} bpm")
+ +        return value
+ +
+ +
+ +class HealthReadingUpdate(BaseModel):
+ +    systolic_bp: Optional[int] = None
+ +    diastolic_bp: Optional[int] = None
+ +    glucose: Optional[float] = None
+ +    weight: Optional[float] = None
+ +    temperature: Optional[float] = None
+ +    oxygen_saturation: Optional[int] = None
+ +    heart_rate: Optional[int] = None
+ +    symptoms: Optional[str] = None
+ +    notes: Optional[str] = None
+ +    photo_url: Optional[str] = None
+ +    recorded_at: Optional[datetime] = None
+ +
+ +
+ +class HealthReadingResponse(BaseModel):
+ +    id: UUID
+ +    patient_id: UUID
+ +    recorded_by: UUID
+ +    recorded_at: datetime
+ +
+ +    systolic_bp: Optional[int] = None
+ +    diastolic_bp: Optional[int] = None
+ +    glucose: Optional[float] = None
+ +    weight: Optional[float] = None
+ +    temperature: Optional[float] = None
+ +    oxygen_saturation: Optional[int] = None
+ +    heart_rate: Optional[int] = None
+ +    symptoms: Optional[str] = None
+ +    notes: Optional[str] = None
+ +    photo_url: Optional[str] = None
+ +
+ +    class Config:
+ +        from_attributes = True
+ +
+ +
+ +class LatestVitalsResponse(BaseModel):
+ +    patient_id: UUID
+ +    systolic_bp: Optional[int] = None
+ +    diastolic_bp: Optional[int] = None
+ +    glucose: Optional[float] = None
+ +    weight: Optional[float] = None
+ +    temperature: Optional[float] = None
+ +    oxygen_saturation: Optional[int] = None
+ +    heart_rate: Optional[int] = None
+ +    last_updated: Optional[datetime] = None
+ +
+ +    class Config:
+ +        from_attributes = True
+ +
+ +
+ +class TrendPoint(BaseModel):
+ +    recorded_at: datetime
+ +    value: float
+ +
+ +
+ +class TrendResponse(BaseModel):
+ +    patient_id: UUID
+ +    vital: str
+ +    unit: str
+-     data: list[TrendPoint]
+++    data: list[TrendPoint]
+++=======
++ from datetime import datetime
++ from typing import Optional
++ 
++ from pydantic import BaseModel, UUID4, field_validator, model_validator
++ 
++ 
++ BP_SYSTOLIC_RANGE = (60, 250)
++ BP_DIASTOLIC_RANGE = (40, 150)
++ GLUCOSE_RANGE = (20, 600)
++ WEIGHT_RANGE = (1, 500)
++ TEMP_RANGE = (30, 45)
++ O2_RANGE = (50, 100)
++ HR_RANGE = (20, 300)
++ 
++ 
++ class HealthReadingCreate(BaseModel):
++     patient_id: UUID4
++ 
++     systolic_bp: Optional[int] = None
++     diastolic_bp: Optional[int] = None
++     glucose: Optional[float] = None
++     weight: Optional[float] = None
++     temperature: Optional[float] = None
++     oxygen_saturation: Optional[int] = None
++     heart_rate: Optional[int] = None
++ 
++     symptoms: Optional[str] = None
++     notes: Optional[str] = None
++     photo_url: Optional[str] = None
++     recorded_at: Optional[datetime] = None
++ 
++     @model_validator(mode="after")
++     def at_least_one_vital(self) -> "HealthReadingCreate":
++         values = [
++             self.systolic_bp,
++             self.diastolic_bp,
++             self.glucose,
++             self.weight,
++             self.temperature,
++             self.oxygen_saturation,
++             self.heart_rate,
++             self.symptoms,
++         ]
++         if all(value is None for value in values):
++             raise ValueError("At least one vital or symptom must be provided")
++         return self
++ 
++     @field_validator("systolic_bp")
++     @classmethod
++     def validate_systolic(cls, value):
++         if value is not None and not BP_SYSTOLIC_RANGE[0] <= value <= BP_SYSTOLIC_RANGE[1]:
++             raise ValueError(f"Systolic BP must be {BP_SYSTOLIC_RANGE[0]}-{BP_SYSTOLIC_RANGE[1]} mmHg")
++         return value
++ 
++     @field_validator("diastolic_bp")
++     @classmethod
++     def validate_diastolic(cls, value):
++         if value is not None and not BP_DIASTOLIC_RANGE[0] <= value <= BP_DIASTOLIC_RANGE[1]:
++             raise ValueError(f"Diastolic BP must be {BP_DIASTOLIC_RANGE[0]}-{BP_DIASTOLIC_RANGE[1]} mmHg")
++         return value
++ 
++     @field_validator("glucose")
++     @classmethod
++     def validate_glucose(cls, value):
++         if value is not None and not GLUCOSE_RANGE[0] <= value <= GLUCOSE_RANGE[1]:
++             raise ValueError(f"Glucose must be {GLUCOSE_RANGE[0]}-{GLUCOSE_RANGE[1]} mg/dL")
++         return value
++ 
++     @field_validator("weight")
++     @classmethod
++     def validate_weight(cls, value):
++         if value is not None and not WEIGHT_RANGE[0] <= value <= WEIGHT_RANGE[1]:
++             raise ValueError(f"Weight must be {WEIGHT_RANGE[0]}-{WEIGHT_RANGE[1]} kg")
++         return value
++ 
++     @field_validator("temperature")
++     @classmethod
++     def validate_temperature(cls, value):
++         if value is not None and not TEMP_RANGE[0] <= value <= TEMP_RANGE[1]:
++             raise ValueError(f"Temperature must be {TEMP_RANGE[0]}-{TEMP_RANGE[1]} C")
++         return value
++ 
++     @field_validator("oxygen_saturation")
++     @classmethod
++     def validate_o2(cls, value):
++         if value is not None and not O2_RANGE[0] <= value <= O2_RANGE[1]:
++             raise ValueError(f"O2 saturation must be {O2_RANGE[0]}-{O2_RANGE[1]}%")
++         return value
++ 
++     @field_validator("heart_rate")
++     @classmethod
++     def validate_heart_rate(cls, value):
++         if value is not None and not HR_RANGE[0] <= value <= HR_RANGE[1]:
++             raise ValueError(f"Heart rate must be {HR_RANGE[0]}-{HR_RANGE[1]} bpm")
++         return value
++ 
++ 
++ class HealthReadingUpdate(BaseModel):
++     systolic_bp: Optional[int] = None
++     diastolic_bp: Optional[int] = None
++     glucose: Optional[float] = None
++     weight: Optional[float] = None
++     temperature: Optional[float] = None
++     oxygen_saturation: Optional[int] = None
++     heart_rate: Optional[int] = None
++     symptoms: Optional[str] = None
++     notes: Optional[str] = None
++     photo_url: Optional[str] = None
++     recorded_at: Optional[datetime] = None
++ 
++ 
++ class HealthReadingResponse(BaseModel):
++     id: UUID4
++     patient_id: UUID4
++     recorded_by: UUID4
++     recorded_at: datetime
++ 
++     systolic_bp: Optional[int] = None
++     diastolic_bp: Optional[int] = None
++     glucose: Optional[float] = None
++     weight: Optional[float] = None
++     temperature: Optional[float] = None
++     oxygen_saturation: Optional[int] = None
++     heart_rate: Optional[int] = None
++     symptoms: Optional[str] = None
++     notes: Optional[str] = None
++     photo_url: Optional[str] = None
++ 
++     class Config:
++         from_attributes = True
++ 
++ 
++ class LatestVitalsResponse(BaseModel):
++     patient_id: UUID4
++     systolic_bp: Optional[int] = None
++     diastolic_bp: Optional[int] = None
++     glucose: Optional[float] = None
++     weight: Optional[float] = None
++     temperature: Optional[float] = None
++     oxygen_saturation: Optional[int] = None
++     heart_rate: Optional[int] = None
++     last_updated: Optional[datetime] = None
++ 
++ 
++ class TrendPoint(BaseModel):
++     recorded_at: datetime
++     value: float
++ 
++ 
++ class TrendResponse(BaseModel):
++     patient_id: UUID4
++     vital: str
++     unit: str
++     data: list[TrendPoint]
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/schemas/hospital.py
+index 982af55,c1006f7..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/schemas/hospital.py
++++ b/CareSync-backend/app/schemas/hospital.py
+@@@ -1,35 -1,34 +1,72 @@@
+++<<<<<<< Updated upstream
+ +from typing import Optional
+ +from uuid import UUID
+ +from pydantic import BaseModel
+ +
+ +
+ +class HospitalBase(BaseModel):
+ +    name: str
+ +    address: Optional[str] = None
+ +    city: Optional[str] = None
+ +    country: Optional[str] = None
+ +    latitude: float
+ +    longitude: float
+ +    is_active: bool = True
+ +
+ +
+ +class HospitalCreate(HospitalBase):
+ +    agency_id: Optional[UUID] = None
+ +
+ +
+ +class HospitalUpdate(BaseModel):
+ +    name: Optional[str] = None
+ +    address: Optional[str] = None
+ +    city: Optional[str] = None
+ +    country: Optional[str] = None
+ +    latitude: Optional[float] = None
+ +    longitude: Optional[float] = None
+ +    is_active: Optional[bool] = None
+ +
+ +
+ +class HospitalResponse(HospitalBase):
+ +    id: UUID
+ +    agency_id: Optional[UUID] = None
+ +
+ +    class Config:
+ +        from_attributes = True
+++=======
++ from typing import Optional
++ from pydantic import BaseModel, UUID4
++ 
++ 
++ class HospitalBase(BaseModel):
++     name: str
++     address: Optional[str] = None
++     city: Optional[str] = None
++     country: Optional[str] = None
++     latitude: float
++     longitude: float
++     is_active: bool = True
++ 
++ 
++ class HospitalCreate(HospitalBase):
++     agency_id: Optional[UUID4] = None
++ 
++ 
++ class HospitalUpdate(BaseModel):
++     name: Optional[str] = None
++     address: Optional[str] = None
++     city: Optional[str] = None
++     country: Optional[str] = None
++     latitude: Optional[float] = None
++     longitude: Optional[float] = None
++     is_active: Optional[bool] = None
++ 
++ 
++ class HospitalResponse(HospitalBase):
++     id: UUID4
++     agency_id: Optional[UUID4] = None
++ 
++     class Config:
++         from_attributes = True
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/schemas/medication.py
+index 47d9efb,b8ac461..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/schemas/medication.py
++++ b/CareSync-backend/app/schemas/medication.py
+@@@ -1,39 -1,38 +1,80 @@@
+++<<<<<<< Updated upstream
+ +from datetime import datetime
+ +from typing import List, Optional
+ +
+ +from uuid import UUID
+ +from pydantic import BaseModel, Field
+ +
+ +
+ +class MedicationBase(BaseModel):
+ +    name: str = Field(..., max_length=255)
+ +    dosage: str = Field(..., max_length=100)
+ +    schedule: List[str]
+ +    next_due_at: datetime
+ +
+ +
+ +class MedicationCreate(MedicationBase):
+ +    patient_id: UUID
+ +    last_administered_at: Optional[datetime] = None
+ +
+ +
+ +class MedicationUpdate(BaseModel):
+ +    name: Optional[str] = Field(None, max_length=255)
+ +    dosage: Optional[str] = Field(None, max_length=100)
+ +    schedule: Optional[List[str]] = None
+ +    last_administered_at: Optional[datetime] = None
+ +    next_due_at: Optional[datetime] = None
+ +    missed: Optional[bool] = None
+ +    adherence_percent: Optional[float] = Field(None, ge=0, le=100)
+ +
+ +
+ +class MedicationResponse(MedicationBase):
+ +    id: UUID
+ +    patient_id: UUID
+ +    last_administered_at: Optional[datetime] = None
+ +    missed: bool
+ +    adherence_percent: float
+ +    created_at: datetime
+ +
+ +    class Config:
+ +        from_attributes = True
+++=======
++ from datetime import datetime
++ from typing import List, Optional
++ 
++ from pydantic import BaseModel, Field, UUID4
++ 
++ 
++ class MedicationBase(BaseModel):
++     name: str = Field(..., max_length=255)
++     dosage: str = Field(..., max_length=100)
++     schedule: List[str]
++     next_due_at: datetime
++ 
++ 
++ class MedicationCreate(MedicationBase):
++     patient_id: UUID4
++     last_administered_at: Optional[datetime] = None
++ 
++ 
++ class MedicationUpdate(BaseModel):
++     name: Optional[str] = Field(None, max_length=255)
++     dosage: Optional[str] = Field(None, max_length=100)
++     schedule: Optional[List[str]] = None
++     last_administered_at: Optional[datetime] = None
++     next_due_at: Optional[datetime] = None
++     missed: Optional[bool] = None
++     adherence_percent: Optional[float] = Field(None, ge=0, le=100)
++ 
++ 
++ class MedicationResponse(MedicationBase):
++     id: UUID4
++     patient_id: UUID4
++     last_administered_at: Optional[datetime] = None
++     missed: bool
++     adherence_percent: float
++     created_at: datetime
++ 
++     class Config:
++         from_attributes = True
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/schemas/patient.py
+index 2c9613d,9d4fc2d..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/schemas/patient.py
++++ b/CareSync-backend/app/schemas/patient.py
+@@@ -1,40 -1,40 +1,83 @@@
+++<<<<<<< Updated upstream
+ +from pydantic import BaseModel, Field, field_validator
+ +from datetime import date
+ +from typing import Optional, List
+ +from uuid import UUID
+ +
+ +class PatientProfileBase(BaseModel):
+ +    date_of_birth: Optional[date] = None
+ +    gender: Optional[str] = Field(None, pattern="^(male|female|other)$")
+ +    blood_type: Optional[str] = Field(None, pattern="^(A|B|AB|O)[+-]$")
+ +    allergies: Optional[str] = None
+ +    chronic_conditions: Optional[str] = None
+ +    emergency_contact_name: Optional[str] = None
+ +    emergency_contact_phone: Optional[str] = None
+ +
+ +class PatientProfileCreate(PatientProfileBase):
+ +    user_id: UUID  # Must reference an existing user with role='patient'
+ +
+ +class PatientProfileUpdate(PatientProfileBase):
+ +    is_active: Optional[bool] = None
+ +
+ +class PatientProfileResponse(PatientProfileBase):
+ +    id: UUID
+ +    user_id: UUID
+ +    is_active: bool
+ +
+ +    class Config:
+ +        from_attributes = True
+ +
+ +class PatientWithUserResponse(PatientProfileResponse):
+ +    user_email: str
+ +    user_full_name: str
+ +    doctors: List[UUID]  # list of doctor user IDs
+ +    caregivers: List[UUID]  # list of caregiver user IDs
+ +
+ +class PatientListParams(BaseModel):
+ +    skip: int = Field(0, ge=0)
+ +    limit: int = Field(100, ge=1, le=500)
+ +    search: Optional[str] = None  # search by patient name or email
+ +    doctor_id: Optional[UUID] = None
+-     caregiver_id: Optional[UUID] = None
+++    caregiver_id: Optional[UUID] = None
+++=======
++ from pydantic import BaseModel, Field, UUID4, field_validator
++ from datetime import date
++ from typing import Optional, List
++ from uuid import UUID
++ 
++ class PatientProfileBase(BaseModel):
++     date_of_birth: Optional[date] = None
++     gender: Optional[str] = Field(None, pattern="^(male|female|other)$")
++     blood_type: Optional[str] = Field(None, pattern="^(A|B|AB|O)[+-]$")
++     allergies: Optional[str] = None
++     chronic_conditions: Optional[str] = None
++     emergency_contact_name: Optional[str] = None
++     emergency_contact_phone: Optional[str] = None
++ 
++ class PatientProfileCreate(PatientProfileBase):
++     user_id: UUID4  # Must reference an existing user with role='patient'
++ 
++ class PatientProfileUpdate(PatientProfileBase):
++     is_active: Optional[bool] = None
++ 
++ class PatientProfileResponse(PatientProfileBase):
++     id: UUID4
++     user_id: UUID4
++     is_active: bool
++ 
++     class Config:
++         from_attributes = True
++ 
++ class PatientWithUserResponse(PatientProfileResponse):
++     user_email: str
++     user_full_name: str
++     doctors: List[UUID4]  # list of doctor user IDs
++     caregivers: List[UUID4]  # list of caregiver user IDs
++ 
++ class PatientListParams(BaseModel):
++     skip: int = Field(0, ge=0)
++     limit: int = Field(100, ge=1, le=500)
++     search: Optional[str] = None  # search by patient name or email
++     doctor_id: Optional[UUID4] = None
+ -    caregiver_id: Optional[UUID4] = None
+++    caregiver_id: Optional[UUID4] = None
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/schemas/sos.py
+index 5a622c9,35caced..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/schemas/sos.py
++++ b/CareSync-backend/app/schemas/sos.py
+@@@ -1,63 -1,62 +1,128 @@@
+++<<<<<<< Updated upstream
+ +from datetime import datetime
+ +from typing import Any, Dict, Optional
+ +
+ +from uuid import UUID
+ +from pydantic import BaseModel, Field
+ +
+ +from app.models.sos_event import SOSStatus
+ +
+ +
+ +class SOSPayload(BaseModel):
+ +    patient_code: str
+ +    patient_id: UUID
+ +    vitals: Dict[str, Any]
+ +    location: Dict[str, Any]
+ +
+ +
+ +class SOSRoutingResponse(BaseModel):
+ +    hospital_id: str
+ +    hospital_name: str
+ +    distance_km: float
+ +    eta_minutes: int
+ +    status: str
+ +    next_of_kin_notified: bool
+ +    escalation_level: int
+ +
+ +
+ +class SOSEventBase(BaseModel):
+ +    vitals_snapshot: Dict[str, Any]
+ +    location: Dict[str, Any]
+ +
+ +
+ +class SOSEventCreate(SOSEventBase):
+ +    patient_id: UUID
+ +    triggered_by: UUID
+ +
+ +
+ +class SOSEventUpdate(BaseModel):
+ +    status: Optional[SOSStatus] = None
+ +    hospital_id: Optional[str] = Field(None, max_length=100)
+ +    hospital_name: Optional[str] = Field(None, max_length=255)
+ +    distance_km: Optional[float] = None
+ +    eta_minutes: Optional[int] = None
+ +    notified_caregiver: Optional[bool] = None
+ +    notified_next_of_kin: Optional[bool] = None
+ +    resolved_at: Optional[datetime] = None
+ +
+ +
+ +class SOSEventResponse(SOSEventBase):
+ +    id: UUID
+ +    patient_id: UUID
+ +    triggered_by: UUID
+ +    status: SOSStatus
+ +    hospital_id: Optional[str] = None
+ +    hospital_name: Optional[str] = None
+ +    distance_km: Optional[float] = None
+ +    eta_minutes: Optional[int] = None
+ +    notified_caregiver: bool
+ +    notified_next_of_kin: bool
+ +    created_at: datetime
+ +    resolved_at: Optional[datetime] = None
+ +
+ +    class Config:
+ +        from_attributes = True
+++=======
++ from datetime import datetime
++ from typing import Any, Dict, Optional
++ 
++ from pydantic import BaseModel, Field, UUID4
++ 
++ from app.models.sos_event import SOSStatus
++ 
++ 
++ class SOSPayload(BaseModel):
++     patient_code: str
++     patient_id: UUID4
++     vitals: Dict[str, Any]
++     location: Dict[str, Any]
++ 
++ 
++ class SOSRoutingResponse(BaseModel):
++     hospital_id: str
++     hospital_name: str
++     distance_km: float
++     eta_minutes: int
++     status: str
++     next_of_kin_notified: bool
++     escalation_level: int
++ 
++ 
++ class SOSEventBase(BaseModel):
++     vitals_snapshot: Dict[str, Any]
++     location: Dict[str, Any]
++ 
++ 
++ class SOSEventCreate(SOSEventBase):
++     patient_id: UUID4
++     triggered_by: UUID4
++ 
++ 
++ class SOSEventUpdate(BaseModel):
++     status: Optional[SOSStatus] = None
++     hospital_id: Optional[str] = Field(None, max_length=100)
++     hospital_name: Optional[str] = Field(None, max_length=255)
++     distance_km: Optional[float] = None
++     eta_minutes: Optional[int] = None
++     notified_caregiver: Optional[bool] = None
++     notified_next_of_kin: Optional[bool] = None
++     resolved_at: Optional[datetime] = None
++ 
++ 
++ class SOSEventResponse(SOSEventBase):
++     id: UUID4
++     patient_id: UUID4
++     triggered_by: UUID4
++     status: SOSStatus
++     hospital_id: Optional[str] = None
++     hospital_name: Optional[str] = None
++     distance_km: Optional[float] = None
++     eta_minutes: Optional[int] = None
++     notified_caregiver: bool
++     notified_next_of_kin: bool
++     created_at: datetime
++     resolved_at: Optional[datetime] = None
++ 
++     class Config:
++         from_attributes = True
+++>>>>>>> Stashed changes
+diff --cc CareSync-backend/app/schemas/user.py
+index d1f2e7a,adb7657..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/app/schemas/user.py
++++ b/CareSync-backend/app/schemas/user.py
+@@@ -1,58 -1,30 +1,90 @@@
+++<<<<<<< Updated upstream
+ +from pydantic import BaseModel, EmailStr, Field, field_validator
+ +from uuid import UUID
+ +from typing import Optional
+ +from datetime import datetime
+ +
+ +VALID_ROLES = {"super_admin", "admin", "doctor", "caregiver", "patient"}
+ +
+ +class UserBase(BaseModel):
+ +    email: EmailStr
+ +    full_name: str
+ +    role: str  # super_admin, admin, doctor, caregiver, patient
+ +    avatar_url: Optional[str] = None
+ +
+ +class UserCreate(UserBase):
+ +    password: str = Field(..., min_length=8)
+ +    agency_id: Optional[UUID] = None  # Required if role != super_admin
+ +
+ +    @field_validator("role", mode="before")
+ +    @classmethod
+ +    def validate_role(cls, v: str) -> str:
+ +        if not isinstance(v, str):
+ +            raise ValueError("Role must be a string")
+ +        normalized = v.lower().strip()
+ +        if normalized not in VALID_ROLES:
+ +            raise ValueError(
+ +                f"Invalid role: '{v}'. Must be one of: {', '.join(sorted(VALID_ROLES))}"
+ +            )
+ +        return normalized
+ +
+ +class UserUpdate(BaseModel):
+ +    full_name: Optional[str] = None
+ +    avatar_url: Optional[str] = None
+ +    is_active: Optional[bool] = None
+ +    role: Optional[str] = None
+ +
+ +    @field_validator("role", mode="before")
+ +    @classmethod
+ +    def validate_role(cls, v):
+ +        if v is None:
+ +            return v
+ +        if not isinstance(v, str):
+ +            raise ValueError("Role must be a string")
+ +        normalized = v.lower().strip()
+ +        if normalized not in VALID_ROLES:
+ +            raise ValueError(
+ +                f"Invalid role: '{v}'. Must be one of: {', '.join(sorted(VALID_ROLES))}"
+ +            )
+ +        return normalized
+ +
+ +class UserResponse(UserBase):
+ +    id: UUID
+ +    agency_id: Optional[UUID]
+ +    is_active: bool
+ +    created_at: datetime
+ +    updated_at: datetime
+ +
+ +    class Config:
+++=======
++ from pydantic import BaseModel, EmailStr, Field
++ from uuid import UUID
++ from typing import Optional
++ from datetime import datetime
++ 
++ class UserBase(BaseModel):
++     email: EmailStr
++     full_name: str
++     role: str  # super_admin, admin, doctor, caregiver, patient
++     avatar_url: Optional[str] = None
++ 
++ class UserCreate(UserBase):
++     password: str = Field(..., min_length=8)
++     agency_id: Optional[UUID] = None  # Required if role != super_admin
++ 
++ class UserUpdate(BaseModel):
++     full_name: Optional[str] = None
++     avatar_url: Optional[str] = None
++     is_active: Optional[bool] = None
++     role: Optional[str] = None
++ 
++ class UserResponse(UserBase):
++     id: UUID
++     agency_id: Optional[UUID]
++     is_active: bool
++     created_at: datetime
++     updated_at: datetime
++ 
++     class Config:
+++>>>>>>> Stashed changes
+          from_attributes = True
+diff --cc CareSync-backend/requirements.txt
+index 00342fb,3b90b7f..0000000
+mode 100644,100644..100755
+--- a/CareSync-backend/requirements.txt
++++ b/CareSync-backend/requirements.txt
+@@@ -1,22 -1,21 +1,46 @@@
+++<<<<<<< Updated upstream
+ +fastapi==0.115.0
+ +uvicorn[standard]==0.30.0
+ +sqlalchemy==2.0.35
+ +asyncpg==0.29.0
+ +psycopg2-binary==2.9.9
+ +python-jose[cryptography]==3.3.0
+ +passlib[bcrypt]==1.7.4
+ +bcrypt==4.0.1
+ +python-multipart==0.0.9
+ +pydantic[email]==2.9.0
+ +pydantic-settings==2.4.0
+ +email-validator==2.1.1
+ +resend==2.4.0
+ +sendgrid==6.11.0
+ +python-dotenv==1.0.0
+ +alembic==1.13.0
+ +pytest==8.3.0
+ +pytest-asyncio==0.23.0
+ +httpx==0.27.0
+ +daily-python==0.1.0
+ +openai==1.40.0
+ +apscheduler==3.10.0
+++=======
++ fastapi==0.115.0
++ uvicorn[standard]==0.30.0
++ sqlalchemy==2.0.35
++ asyncpg==0.29.0
++ psycopg2-binary==2.9.9
++ python-jose[cryptography]==3.3.0
++ passlib[bcrypt]==1.7.4
++ bcrypt==4.0.1
++ python-multipart==0.0.9
++ pydantic[email]==2.9.0
++ pydantic-settings==2.4.0
++ email-validator==2.1.1
++ resend==2.4.0
++ sendgrid==6.11.0
++ python-dotenv==1.0.0
++ alembic==1.13.0
++ pytest==8.3.0
++ pytest-asyncio==0.23.0
++ httpx==0.27.0
++ daily-python==0.1.0
++ openai==1.40.0
+++>>>>>>> Stashed changes

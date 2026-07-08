@@ -11,9 +11,16 @@ import {
 import * as authService from "@/lib/services/auth";
 import type { LoginRequest } from "@/lib/types/auth";
 
+type AuthUser = {
+  first_name?: string;
+  last_name?: string;
+  role?: string;
+};
+
 type AuthState = {
   accessToken: string | null;
   refreshToken: string | null;
+  user: AuthUser | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   initialized: boolean;
@@ -27,6 +34,7 @@ type AuthState = {
 export const useAuthStore = create<AuthState>((set, get) => ({
   accessToken: null,
   refreshToken: null,
+  user: null,
   isAuthenticated: false,
   isLoading: false,
   initialized: false,
@@ -43,6 +51,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({
         accessToken,
         refreshToken,
+        user: null,
         isAuthenticated: true,
         initialized: true,
       });
@@ -53,6 +62,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({
       accessToken: null,
       refreshToken: null,
+      user: null,
       isAuthenticated: false,
       initialized: true,
     });
@@ -74,6 +84,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
+        user: null,
         isAuthenticated: true,
         isLoading: false,
         error: null,
@@ -101,6 +112,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({
         accessToken: null,
         refreshToken: null,
+        user: null,
         isAuthenticated: false,
         isLoading: false,
         error: null,

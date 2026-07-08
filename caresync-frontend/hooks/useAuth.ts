@@ -7,6 +7,7 @@ import { useAuthStore } from "@/stores/auth-store";
  */
 export function useAuth() {
   const accessToken = useAuthStore((state) => state.accessToken);
+  const user = useAuthStore((state) => state.user);
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   const isLoading = useAuthStore((state) => state.isLoading);
   const initialized = useAuthStore((state) => state.initialized);
@@ -18,6 +19,7 @@ export function useAuth() {
 
   return {
     accessToken,
+    user,
     isAuthenticated,
     isLoading,
     initialized,
