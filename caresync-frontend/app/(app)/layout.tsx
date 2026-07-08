@@ -25,31 +25,39 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   if (!isAuthenticated) return null;
 
   return (
-    <div className="flex h-screen bg-gray-50 overflow-hidden">
+    <div className="flex h-screen overflow-hidden bg-slate-50">
 
       {/* Sidebar */}
-      <aside className="w-56 bg-white border-r border-gray-100 flex flex-col flex-shrink-0">
+      <aside className="flex w-64 flex-shrink-0 flex-col border-r border-slate-200 bg-white shadow-sm">
 
         {/* Logo */}
-        <div className="px-5 py-5 border-b border-gray-100">
-          <span className="text-base font-medium text-teal-700">CareSync</span>
+        <div className="border-b border-slate-200 px-5 py-5">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-sm font-semibold text-primary">
+              CS
+            </div>
+            <div>
+              <p className="text-base font-semibold text-slate-900">CareSync</p>
+              <p className="text-xs text-slate-500">Remote care hub</p>
+            </div>
+          </div>
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
+        <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
           {NAV_ITEMS.map((item) => {
             const active = pathname === item.href || pathname.startsWith(item.href + "/");
             return (
               <button
                 key={item.href}
                 onClick={() => router.push(item.href)}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left ${
+                className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-all ${
                   active
-                    ? "bg-teal-50 text-teal-800 font-medium"
-                    : "text-gray-500 hover:bg-gray-50 hover:text-gray-800"
+                    ? "bg-primary/10 font-semibold text-primary"
+                    : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
                 }`}
               >
-                <i className={`ti ${item.icon} text-base`} aria-hidden="true" />
+                <span className={`h-2.5 w-2.5 rounded-full ${active ? "bg-primary" : "bg-slate-300"}`} />
                 {item.label}
               </button>
             );
@@ -57,21 +65,21 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         </nav>
 
         {/* User */}
-        <div className="px-4 py-4 border-t border-gray-100">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-7 h-7 rounded-full bg-teal-50 text-teal-800 flex items-center justify-center text-xs font-medium flex-shrink-0">
+        <div className="border-t border-slate-200 px-4 py-4">
+          <div className="mb-3 flex items-center gap-3">
+            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary">
               {user?.first_name?.[0]}{user?.last_name?.[0]}
             </div>
             <div className="min-w-0">
-              <p className="text-xs font-medium text-gray-900 truncate">
+              <p className="truncate text-sm font-semibold text-slate-900">
                 {user?.first_name} {user?.last_name}
               </p>
-              <p className="text-xs text-gray-400 truncate capitalize">{user?.role}</p>
+              <p className="truncate text-xs capitalize text-slate-500">{user?.role}</p>
             </div>
           </div>
           <button
             onClick={logout}
-            className="w-full text-xs text-gray-400 hover:text-red-600 transition-colors text-left px-1"
+            className="w-full px-1 text-left text-sm text-slate-500 transition-colors hover:text-destructive"
           >
             Sign out
           </button>
@@ -79,7 +87,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-y-auto">
+      <main className="flex-1 overflow-y-auto bg-slate-50">
         {children}
       </main>
 

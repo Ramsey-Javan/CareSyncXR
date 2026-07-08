@@ -51,15 +51,15 @@ const dashboardCards = [
 
 export default function DashboardPage() {
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6 md:p-8">
       <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-        <p className="text-sm font-medium uppercase tracking-[0.2em] text-slate-500">
+        <p className="text-sm font-semibold uppercase tracking-[0.25em] text-primary">
           CareSync workspace
         </p>
-        <h1 className="mt-2 text-2xl font-semibold text-slate-900">
+        <h1 className="mt-2 text-3xl font-semibold text-slate-900">
           Care coordination at a glance
         </h1>
-        <p className="mt-3 max-w-2xl text-sm text-slate-600">
+        <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-600">
           Use this landing page to reach the core patient management and health
           monitoring workflows without leaving the dashboard.
         </p>
@@ -73,10 +73,10 @@ export default function DashboardPage() {
             <Link
               key={card.title}
               href={card.href}
-              className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md"
+              className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md"
             >
               <div className="flex items-center gap-3">
-                <div className="rounded-xl bg-slate-100 p-2 text-slate-700">
+                <div className="rounded-xl bg-primary/10 p-2 text-primary">
                   <Icon className="h-5 w-5" />
                 </div>
                 <h2 className="text-lg font-semibold text-slate-900">{card.title}</h2>

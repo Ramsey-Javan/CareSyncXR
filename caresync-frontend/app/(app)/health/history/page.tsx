@@ -28,28 +28,29 @@ export default function HistoryPage() {
   }));
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="space-y-6 p-6 md:p-8">
 
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-semibold text-[#04342C]">
+      <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+        <p className="text-sm font-semibold uppercase tracking-[0.25em] text-primary">History</p>
+        <h1 className="mt-2 text-2xl font-semibold text-slate-900">
           Reading History & Trends
         </h1>
-        <p className="text-gray-500">
+        <p className="mt-2 text-sm text-slate-600">
           Track patient vitals over time
         </p>
       </div>
 
       {/* Metric Switcher */}
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         {["bp", "glucose", "hr", "spo2", "weight"].map((m) => (
           <button
             key={m}
             onClick={() => setMetric(m)}
-            className={`px-4 py-2 rounded-lg border ${
+            className={`rounded-full border px-4 py-2 text-sm font-medium transition ${
               metric === m
-                ? "bg-[#1D9E75] text-white"
-                : "bg-white text-gray-600"
+                ? "border-primary bg-primary text-white"
+                : "border-slate-200 bg-white text-slate-600 hover:border-primary/30 hover:text-primary"
             }`}
           >
             {m.toUpperCase()}
@@ -58,24 +59,26 @@ export default function HistoryPage() {
       </div>
 
       {/* Trend Graph */}
-      <TrendChart data={chartData} metric={metric} />
+      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <TrendChart data={chartData} metric={metric} />
+      </div>
 
       {/* History List */}
       <div className="space-y-3">
         {readings.map((r: any) => (
           <div
             key={r.id}
-            className="border border-[#9FE1CB] rounded-xl p-4 bg-white"
+            className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
           >
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-slate-500">
               {new Date(r.recorded_at).toLocaleString()}
             </p>
 
-            <div className="grid grid-cols-2 gap-2 mt-2 text-sm">
-              <p>BP: {r.bp_systolic}/{r.bp_diastolic}</p>
-              <p>Glucose: {r.glucose_fasting}</p>
-              <p>HR: {r.heart_rate}</p>
-              <p>SpO₂: {r.spo2}</p>
+            <div className="mt-3 grid grid-cols-2 gap-2 text-sm text-slate-700">
+              <p className="rounded-lg bg-slate-50 px-3 py-2">BP: {r.bp_systolic}/{r.bp_diastolic}</p>
+              <p className="rounded-lg bg-slate-50 px-3 py-2">Glucose: {r.glucose_fasting}</p>
+              <p className="rounded-lg bg-slate-50 px-3 py-2">HR: {r.heart_rate}</p>
+              <p className="rounded-lg bg-slate-50 px-3 py-2">SpO₂: {r.spo2}</p>
             </div>
           </div>
         ))}
